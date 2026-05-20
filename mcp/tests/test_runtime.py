@@ -372,7 +372,7 @@ class RuntimeTestCase(unittest.TestCase):
                 "s1", [receipt.receipt_id, receipt.receipt_id], "dup-verify"
             )
 
-    def test_list_recent_receipts_trims_whitespace_task_scope(self) -> None:
+    def test_list_recent_receipts_whitespace_scope_prefers_active_mission(self) -> None:
         self.server.mission_lock("s1", "task-a", "goal", ["criterion"])
         self.server.mission_lock("s1", "task-b", "goal", ["criterion"])
         receipt_a = self.make_bash_receipt("s1", "task-a", "pytest task_a", exit_code=0)
@@ -383,8 +383,8 @@ class RuntimeTestCase(unittest.TestCase):
 
         self.assertIn(receipt_a.receipt_id, scoped)
         self.assertNotIn(receipt_b.receipt_id, scoped)
-        self.assertIn(receipt_a.receipt_id, whitespace_all)
         self.assertIn(receipt_b.receipt_id, whitespace_all)
+        self.assertNotIn(receipt_a.receipt_id, whitespace_all)
 
     def test_mission_status_trims_whitespace_task_scope(self) -> None:
         self.server.mission_lock("s1", "task-a", "goal a", ["criterion a"])
@@ -2037,17 +2037,13 @@ class RuntimeTestCase(unittest.TestCase):
         self.assertIn("REJECTED", rejected)
         self.assertIn("semantic", rejected.lower())
 
-    def test_secret_creation_warns_when_windows_permissions_remain_broad(self) -> None:
-        import sys
-        if not sys.platform.startswith("win"):
-            self.skipTest("Windows-specific warning behavior")
-
+    def test_secret_creation_fails_closed_when_windows_permissions_remain_broad(self) -> None:
         import agent_runway_runtime.store as store_module
 
         warning_secret = Path(self.temp_dir.name) / "warn-secret.key"
         os.environ["ILH_SECRET_PATH"] = str(warning_secret)
-        stderr = io.StringIO()
         original_run = store_module.subprocess.run
+        original_platform = store_module.sys.platform
         calls: list[list[str]] = []
 
         def fake_run(cmd, **kwargs):
@@ -2061,13 +2057,15 @@ class RuntimeTestCase(unittest.TestCase):
             return Result()
 
         store_module.subprocess.run = fake_run
+        store_module.sys.platform = "win32"
         try:
-            with redirect_stderr(stderr):
+            with self.assertRaisesRegex(PermissionError, "Windows secret ACL could not be tightened"):
                 _ = store_module.RuntimeStore(db_path=str(Path(self.temp_dir.name) / "warn-state.db"))
         finally:
             store_module.subprocess.run = original_run
+            store_module.sys.platform = original_platform
         self.assertTrue(any(cmd and cmd[0].lower() == "icacls" for cmd in calls))
-        self.assertIn("WARNING", stderr.getvalue())
+        self.assertFalse(warning_secret.exists())
 
     def test_duplicate_receipt_id_does_not_replace_existing_receipt_row(self) -> None:
         self.server.mission_lock("s1", "ledger-task", "goal", ["criterion"])

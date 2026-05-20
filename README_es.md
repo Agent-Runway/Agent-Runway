@@ -1,6 +1,6 @@
 # Agent-Runway
 
-[![Version](https://img.shields.io/badge/version-v0.35-blue)](../../issues)
+[![Version](https://img.shields.io/badge/version-v0.36-blue)](../../issues)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11+-blue)](https://python.org)
 
@@ -32,16 +32,17 @@ Lee esta sección primero como un resumen de capacidades; la tabla de cinco prob
 | 🚪 Completion gate | Cada criterio se asigna a receipts -> sin "done" sin sustento |
 | 💰 Budget discipline | Slice/retry/time + `wrap_up_guidance` al agotarse -> sin teatro de reintentos infinitos |
 | 🛡️ Stale-evidence guard | Tras editar archivos, hay que volver a verificar -> evita lavar evidencia vieja con "edité y luego leí" |
-| 🚫 Assertion blocking | 9 patrones regex rechazan "should work" / "probably" / "I believe" |
+| 🚫 Assertion blocking | 15 patrones regex rechazan "should work" / "probably" / "I believe" |
 | 🔬 Counterexample | `record_counterexample_check` -> hipótesis + refutaciones + riesgo remanente |
 | 📝 Decision records | `record_decision_record` -> decisión + alternativas rechazadas + disparadores de reapertura |
 | 🔐 Authorization | Las acciones irreversibles requieren aprobación del usuario registrada y con vigencia |
 | 🔄 Failure escalation | `record_stuck_attempt` -> solo cuentan estrategias materialmente distintas; escalado tras agotar retry budget |
 | 📦 Handoff packet | Paquete JSON completo entre cualquier host -> continuidad sin memoria oculta |
-| ⛔ Stop enforcement | Bloqueo físico de Stop en Claude Code (hook Stop); en Codex/OpenCode es advisory |
+| ⛔ Stop enforcement | Bloqueo físico de Stop en Claude Code (hook Stop); en Codex/OpenCode/Pi CLI es advisory |
 | ⚠️ Dangerous command interception | 10 categorías + denegación de `secret path` con coincidencia de variantes multiplataforma |
 | ⚖️ Value Gate | Solo continuar cuando el impacto es alto, verificable y de baja expansión |
 | 🧠 Project Learning Ledger | JSONL revisable para pitfalls, runbooks, preferencias e invariants del proyecto; solo advisory, nunca evidencia ni autorización |
+| 🧪 Adversarial Audit Gate | Falsificación acotada para claims de finalización de alto riesgo; nunca prueba ausencia de bugs |
 
 ## 🎯 Los cinco problemas que resuelve
 
@@ -93,6 +94,8 @@ Esto no es un prompt que "pide evidencia". Es estado estructurado: mission objec
 Muestra el modo más fuerte actualmente declarado para cada host; `🟡 host-specific` significa que esa intercepción extra depende del host.
 
 OpenCode usa configuración MCP nativa por defecto. Este repositorio incluye la implementación real del bridge en `.opencode/plugins/agent-runway.js`, pero OpenCode no auto-descubre plugins desde directorios de skill. Solo auto-carga plugins locales desde `.opencode/plugins/` del proyecto, `~/.config/opencode/plugins/` del usuario o, en Windows, `%USERPROFILE%\.config\opencode\plugins\`. Si quieres que los tool events de OpenCode se reenvíen automáticamente al receipt ledger, coloca un `shim` o `symlink` en uno de esos directorios de plugins de OpenCode para que re-exporte el plugin del skill y luego establece `ILH_OPENCODE_BRIDGE=1`. Esto mejora la captura de receipts.
+
+El soporte de Pi CLI es intencionalmente más estrecho. `python scripts/generate_host_config.py --host pi-cli --project-dir <project-root>` emite solo una nota extension-only, no una configuración MCP nativa. La ruta de intercepción verificada usa una extensión de Pi con `pi.on("tool_call", ...)` que devuelve `{ block: true, reason: "..." }`; consulta `scripts/fixtures/pi_block_extension.js`.
 
 ## 🔍 Cómo deciden los gates
 
@@ -163,6 +166,7 @@ Ayúdame a instalar Agent-Runway:
    - Claude Code -> <ruta-del-repo>/.claude/settings.json
    - OpenCode -> el archivo de configuración de OpenCode que realmente uso, por ejemplo ~/.config/opencode/opencode.json, ~/.config/opencode/config.json, %USERPROFILE%\.config\opencode\opencode.json o %USERPROFILE%\.config\opencode\config.json
    - Codex/Cursor -> la sección env de configuración del servidor MCP de ese host
+   - Pi CLI -> nota extension-only; no se emite configuración MCP nativa
 6. Si el host es OpenCode y quiero captura automática de tool-event receipts, crea ~/.config/opencode/plugins/agent-runway.js (o %USERPROFILE%\.config\opencode\plugins\agent-runway.js) con: export { default } from "../skills/agent-runway/.opencode/plugins/agent-runway.js"
 7. Si el skill está instalado en otra ubicación, ajusta esa ruta de re-export al lugar real del skill. Usa un shim o symlink; no copies sin más el raw plugin file a menos que también conserves su ruta relativa hacia scripts/opencode_plugin_bridge.py
 8. Establece ILH_OPENCODE_BRIDGE=1 en la configuración generada de OpenCode o en el entorno del host y reinicia OpenCode
@@ -200,6 +204,13 @@ python scripts/generate_host_config.py --host opencode --project-dir <project-ro
 python scripts/generate_host_config.py --host <codex|cursor> --project-dir <project-root>
 ```
 
+**Pi CLI:**
+```bash
+python scripts/generate_host_config.py --host pi-cli --project-dir <project-root>
+```
+
+La salida de Pi CLI es una nota de capacidad extension-only, no un instalador MCP nativo.
+
 #### 2. Copiar la configuración al archivo correspondiente
 
 **Claude Code:** copia el JSON de salida y fusiónalo en `.claude/settings.json` en la raíz del proyecto.
@@ -232,6 +243,12 @@ python -m unittest discover -s mcp/tests -p "test_*.py"
 python scripts/smoke_test.py
 ```
 
+Para reproducir evidencia de bloqueo a nivel de host cuando Claude Code, OpenCode, Node y npm estén disponibles:
+
+```bash
+python scripts/host_blocking_experiments.py
+```
+
 ### Detalles de configuración
 
 **Ubicaciones predeterminadas de archivos de runtime:**
@@ -262,7 +279,8 @@ python scripts/smoke_test.py
 │   ├── release_gate.py              # harness de 16 gates
 │   ├── release_static_checks.py     # comprobaciones estáticas
 │   ├── project_learning_lint.py     # lint del Project Learning Ledger
-│   └── project_learning_query.py    # consulta advisory acotada del ledger
+│   ├── project_learning_query.py    # consulta advisory acotada del ledger
+│   └── host_blocking_experiments.py # experimentos reproducibles de bloqueo de host
 ├── .opencode/
 │   └── plugins/                     # bridge opcional de OpenCode
 └── references/                      # arquitectura, host, budget, receipt, parity, release y project learning
@@ -277,6 +295,7 @@ python scripts/smoke_test.py
 - Con Host Hooks, los shell commands peligrosos disparan confirmación antes de ejecutarse
 - Con Host Hooks, cualquier receipt nuevo después de una aprobación de gate deja obsoleta esa aprobación, así que `Stop` exige una decisión de gate nueva
 - OpenCode `ask` es fail-closed, no un diálogo nativo de confirmación
+- El soporte de Pi CLI es extension-only: se probó bloqueo `tool_call`, no paridad MCP nativa ni hook Stop
 - Codex y Cursor son rutas MCP en este repositorio
 - Project Learning Ledger es solo advisory: memory no es evidence y preference no es authorization
 

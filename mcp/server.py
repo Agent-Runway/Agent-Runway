@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
@@ -33,12 +34,28 @@ except Exception:  # pragma: no cover
             )
 
 
-from agent_runway_runtime.adversarial_audit import gate_violations
+from agent_runway_runtime.adversarial_audit import audit_stop_gate, budget_usage, gate_violations
 from agent_runway_runtime.store import RuntimeStore
 from agent_runway_runtime.host_tool_taxonomy import EXECUTION_TOOLS, MUTATION_TOOLS, OBSERVATION_TOOLS
+from agent_runway_runtime.debug_logging import write_debug_log
 
 mcp = FastMCP("agent-runway")
 store = RuntimeStore()
+
+BUDGET_EXHAUSTED_GUIDANCE = (
+    "Budget is exhausted. Do not claim another verified slice; wrap up by "
+    "summarizing evidence, unverified items, known risks, and the legal next action."
+)
+RETRY_BUDGET_EXHAUSTED_GUIDANCE = (
+    "Retry budget is exhausted. If local retries are still blocked, use "
+    "stuck_escalation with materially different recorded attempts; otherwise "
+    "continue only with a high-value non-retry slice."
+)
+DEFAULT_BUDGET_GUIDANCE = (
+    "Continue only with a high-value reversible slice that respects the mission "
+    "budgets and red lines."
+)
+MISSION_RECEIPT_SCAN_LIMIT = 100000
 
 LEGAL_STOP_CONDITIONS = {
     "slice_verified",
@@ -55,6 +72,7 @@ LEGAL_STOP_CONDITIONS = {
 # legitimate uses like "the user asked whether i should rerun".
 ASSERTION_SIGNAL_PATTERNS = (
     re.compile(r"\bshould (?:work|pass|be fine|resolve|fix|return|now)\b", re.IGNORECASE),
+    re.compile(r"\bshould be (?:enough|ok)\b", re.IGNORECASE),
     re.compile(r"\bprobably\b", re.IGNORECASE),
     re.compile(r"\bi believe\b", re.IGNORECASE),
     re.compile(r"\b(?:i think|i'?m thinking)\s+(?:it|this|that|the)\b", re.IGNORECASE),
@@ -64,6 +82,7 @@ ASSERTION_SIGNAL_PATTERNS = (
     re.compile(r"\bi['\u2019]?m confident\b", re.IGNORECASE),
     re.compile(r"\bit works\b", re.IGNORECASE),
     re.compile(r"应该(?:可以了|没问题|能过|通过)", re.IGNORECASE),
+    re.compile(r"应该(?:够了|差不多了)", re.IGNORECASE),
     re.compile(r"大概没问题", re.IGNORECASE),
     re.compile(r"看起来对了", re.IGNORECASE),
     re.compile(r"我觉得(?:这次)?能过", re.IGNORECASE),
@@ -103,6 +122,15 @@ def _has_assertion_language(text: str) -> bool:
 
 def _string_list(values: list[str] | None) -> list[str]:
     return [v.strip() for v in (values or []) if isinstance(v, str) and v.strip()]
+
+
+def _receipt_id_list(values: Any, field_name: str = "receipt_ids") -> list[str]:
+    if (
+        not isinstance(values, list)
+        or not all(isinstance(value, str) and value.strip() for value in values)
+    ):
+        raise ValueError(f"{field_name} must be a list of non-empty receipt_id strings.")
+    return [value.strip() for value in values]
 
 
 def _require_unique_receipt_ids(receipt_ids: list[str], field_name: str = "receipt_ids") -> None:
@@ -162,6 +190,81 @@ def _fresh_receipt_warning(receipts: list[Any]) -> list[str]:
             "Receipts are not mission-scoped. Prefer task-scoped receipts for load-bearing claims."
         )
     return warnings
+
+
+def _receipt_in_mission_scope(receipt: Any, task_id: str) -> bool:
+    return receipt.task_id == task_id or receipt.task_id is None
+
+
+def _get_mission_scope_receipts(
+    receipt_ids: list[str], session_id: str, task_id: str
+) -> list[Any]:
+    order = {receipt_id: index for index, receipt_id in enumerate(receipt_ids)}
+    receipts = [
+        receipt
+        for receipt in store.get_receipts(receipt_ids, session_id=session_id)
+        if _receipt_in_mission_scope(receipt, task_id)
+    ]
+    return sorted(receipts, key=lambda receipt: order.get(receipt.receipt_id, len(order)))
+
+
+def _receipt_scope_issues(receipt_ids: list[str], session_id: str, task_id: str | None) -> list[str]:
+    rows = {receipt.receipt_id: receipt for receipt in store.get_receipts(receipt_ids)}
+    issues: list[str] = []
+    for receipt_id in receipt_ids:
+        receipt = rows.get(receipt_id)
+        if receipt is None:
+            issues.append(f"receipt_id {receipt_id!r} was not found")
+            continue
+        if receipt.session_id != session_id:
+            issues.append(
+                f"receipt_id {receipt_id!r} belongs to session_id={receipt.session_id!r}, not {session_id!r}"
+            )
+            continue
+        if task_id is not None and not _receipt_in_mission_scope(receipt, task_id):
+            issues.append(
+                f"receipt_id {receipt_id!r} belongs to task_id={receipt.task_id!r}, not {task_id!r}"
+            )
+    return issues
+
+
+def _receipt_scope_error(receipt_ids: list[str], session_id: str, task_id: str | None) -> str:
+    issues = _receipt_scope_issues(receipt_ids, session_id, task_id)
+    if not issues:
+        return "All referenced receipt_ids must exist and belong to this mission scope."
+    return "; ".join(issues)
+
+
+def _mission_scope_recent_receipts(
+    session_id: str, task_id: str, mission: Any, limit: int
+) -> list[Any]:
+    start_seq = _mission_start_receipt_seq(mission)
+    scan_limit = max(limit, MISSION_RECEIPT_SCAN_LIMIT)
+    receipts = [
+        receipt
+        for receipt in store.list_recent_receipts(session_id, limit=scan_limit)
+        if _receipt_in_mission_scope(receipt, task_id) and int(receipt.seq) > start_seq
+    ]
+    return receipts[:limit]
+
+
+def _latest_mission_receipt_seq(session_id: str, task_id: str, mission: Any) -> int:
+    receipts = _mission_scope_recent_receipts(
+        session_id, task_id, mission, MISSION_RECEIPT_SCAN_LIMIT
+    )
+    return max((int(receipt.seq) for receipt in receipts), default=0)
+
+
+def _latest_mission_tool_seq(
+    session_id: str, task_id: str, mission: Any, tool_names: frozenset[str]
+) -> int:
+    receipts = _mission_scope_recent_receipts(
+        session_id, task_id, mission, MISSION_RECEIPT_SCAN_LIMIT
+    )
+    return max(
+        (int(receipt.seq) for receipt in receipts if receipt.tool_name in tool_names),
+        default=0,
+    )
 
 def _mission_start_receipt_seq(mission: Any) -> int:
     notes = getattr(mission, "notes", None) or {}
@@ -262,7 +365,7 @@ def _criterion_requires_execution_receipt(criterion: str) -> bool:
         "harvest",
         "mine",
     }
-    chinese_needles = ("运行", "回测", "扫描", "渲染", "编译", "执行", "检测", "模拟")
+    chinese_needles = ("运行", "回测", "扫描", "渲染", "编译", "执行", "检测", "模拟", "验证")
     matched = bool(english_tokens & english_needles) or any(
         needle in criterion for needle in chinese_needles
     )
@@ -315,7 +418,7 @@ def _criterion_requires_mutation_receipt(criterion: str) -> bool:
         "landing page copy",
         "marketing copy",
     )
-    chinese_needles = ("撰写", "修改", "更新", "终稿", "文案", "幻灯片")
+    chinese_needles = ("撰写", "修改", "更新", "删除", "重构", "创建", "新增", "移除", "终稿", "文案", "幻灯片")
     matched = bool(english_tokens & english_needles) or any(
         phrase in lowered for phrase in english_phrases
     ) or any(needle in criterion for needle in chinese_needles)
@@ -343,46 +446,38 @@ def _budget_snapshot(
     session_id: str, task_id: str, mission: Any | None = None
 ) -> dict[str, Any]:
     mission = mission or _require_active_mission(session_id, task_id)
-    elapsed_minutes = _minutes_since(mission.created_at)
+    payload = {
+        **_budget_usage_payload(session_id, task_id, mission),
+        **_approval_freshness_payload(session_id, task_id),
+    }
+    audit_budget = (mission.notes or {}).get("adversarial_audit_budget") or {}
+    if audit_budget:
+        audit_records = (mission.notes or {}).get("adversarial_audit_records") or []
+        audit_usage = {}
+        if audit_records:
+            audit_usage = budget_usage(audit_records, audit_budget)
+        return {
+            **payload,
+            "adversarial_audit_budget": audit_budget,
+            "adversarial_audit_usage": audit_usage,
+        }
+    return payload
+
+
+def _budget_usage_payload(session_id: str, task_id: str, mission: Any) -> dict[str, Any]:
+    wall_clock_elapsed = _minutes_since(mission.created_at)
+    active = _active_work_payload(session_id, task_id, mission)
+    elapsed_minutes = active["elapsed_minutes"]
     time_budget = int((mission.notes or {}).get("time_budget_minutes") or 0)
     time_remaining = max(time_budget - elapsed_minutes, 0) if time_budget else None
-    retries_used = len(
-        {
-            attempt.strategy_fingerprint
-            for attempt in store.list_stuck_attempts(session_id, task_id)
-        }
-    )
+    retries_used = _distinct_retry_count(session_id, task_id)
     retries_remaining = max(mission.retry_budget - retries_used, 0)
     slices_remaining = max(mission.slice_budget - mission.slice_count, 0)
-    latest_turn = store.latest_approval(session_id, task_id, gate_type="turn_end_gate")
-    latest_completion = store.latest_approval(
-        session_id, task_id, gate_type="completion_gate"
-    )
-    latest_authorization = store.latest_approval(
-        session_id, task_id, gate_type="user_authorization"
-    )
-
-    if time_budget:
-        ratio = time_remaining / time_budget
-    else:
-        ratio = 1.0
-    min_ratio = min(
-        ratio,
-        (slices_remaining / mission.slice_budget) if mission.slice_budget else 1.0,
-    )
-    budget_exhausted = min_ratio <= 0.0
-    if budget_exhausted:
-        time_pressure = "exhausted"
-    elif min_ratio <= 0.25:
-        time_pressure = "high"
-    elif min_ratio <= 0.5:
-        time_pressure = "medium"
-    else:
-        time_pressure = "low"
-
-    audit_budget = (mission.notes or {}).get("adversarial_audit_budget") or {}
-    payload = {
+    payload: dict[str, Any] = {
         "elapsed_minutes": elapsed_minutes,
+        "wall_clock_elapsed_minutes": wall_clock_elapsed,
+        "receipt_window_minutes": active["receipt_window_minutes"],
+        "receipt_duration_minutes": active["receipt_duration_minutes"],
         "time_budget_minutes": time_budget,
         "time_remaining_minutes": time_remaining,
         "slice_budget": mission.slice_budget,
@@ -391,6 +486,69 @@ def _budget_snapshot(
         "retry_budget": mission.retry_budget,
         "retries_used": retries_used,
         "retries_remaining": retries_remaining,
+    }
+    exhausted = _budget_exhaustion_flags(payload)
+    return {
+        **payload,
+        **exhausted,
+        "time_pressure": _budget_time_pressure(payload, exhausted),
+        "budget_exhausted": any(exhausted.values()),
+        "wrap_up_guidance": _wrap_up_guidance(exhausted),
+    }
+
+
+def _active_work_payload(session_id: str, task_id: str, mission: Any) -> dict[str, int]:
+    receipts = _mission_scope_recent_receipts(
+        session_id, task_id, mission, MISSION_RECEIPT_SCAN_LIMIT
+    )
+    window_minutes = 0
+    if len(receipts) >= 2:
+        times = [_parse_iso(receipt.created_at) for receipt in receipts]
+        window_minutes = max(int((max(times) - min(times)).total_seconds() // 60), 0)
+    duration_minutes = _receipt_duration_minutes(receipts)
+    return {
+        "elapsed_minutes": duration_minutes,
+        "receipt_window_minutes": window_minutes,
+        "receipt_duration_minutes": duration_minutes,
+    }
+
+
+def _receipt_duration_minutes(receipts: list[Any]) -> int:
+    seconds = 0.0
+    for receipt in receipts:
+        duration = (receipt.metadata or {}).get("duration_seconds")
+        if (
+            not isinstance(duration, bool)
+            and isinstance(duration, (int, float))
+            and duration > 0
+            and math.isfinite(float(duration))
+        ):
+            seconds += float(duration)
+    return int(seconds // 60)
+
+
+def _parse_iso(iso_text: str) -> datetime:
+    return datetime.fromisoformat(iso_text.replace("Z", "+00:00"))
+
+
+def _distinct_retry_count(session_id: str, task_id: str) -> int:
+    return len(
+        {
+            attempt.strategy_fingerprint
+            for attempt in store.list_stuck_attempts(session_id, task_id)
+        }
+    )
+
+
+def _approval_freshness_payload(session_id: str, task_id: str) -> dict[str, bool]:
+    latest_turn = store.latest_approval(session_id, task_id, gate_type="turn_end_gate")
+    latest_completion = store.latest_approval(
+        session_id, task_id, gate_type="completion_gate"
+    )
+    latest_authorization = store.latest_approval(
+        session_id, task_id, gate_type="user_authorization"
+    )
+    return {
         "latest_turn_gate_fresh": store.is_approval_fresh(
             latest_turn, session_id, task_id
         ),
@@ -400,22 +558,44 @@ def _budget_snapshot(
         "latest_user_authorization_fresh": store.is_approval_fresh(
             latest_authorization, session_id, task_id
         ),
-        "time_pressure": time_pressure,
-        "budget_exhausted": budget_exhausted,
-        "wrap_up_guidance": _wrap_up_guidance(budget_exhausted),
     }
-    if audit_budget:
-        payload["adversarial_audit_budget"] = audit_budget
-    return payload
 
 
-def _wrap_up_guidance(budget_exhausted: bool) -> str:
-    if budget_exhausted:
-        return (
-            "Budget is exhausted. Do not claim another verified slice; wrap up by "
-            "summarizing evidence, unverified items, known risks, and the legal next action."
-        )
-    return "Continue only with a high-value reversible slice that respects the mission budgets and red lines."
+def _budget_exhaustion_flags(payload: dict[str, Any]) -> dict[str, bool]:
+    return {
+        "slice_budget_exhausted": payload["slices_remaining"] == 0,
+        "retry_budget_exhausted": payload["retries_remaining"] == 0,
+        "time_budget_exhausted": bool(
+            payload["time_budget_minutes"] and payload["time_remaining_minutes"] == 0
+        ),
+    }
+
+
+def _budget_time_pressure(payload: dict[str, Any], exhausted: dict[str, bool]) -> str:
+    if exhausted["slice_budget_exhausted"] or exhausted["time_budget_exhausted"]:
+        return "exhausted"
+    time_budget = payload["time_budget_minutes"]
+    if time_budget:
+        ratio = payload["time_remaining_minutes"] / time_budget
+    else:
+        ratio = 1.0
+    min_ratio = min(
+        ratio,
+        payload["slices_remaining"] / payload["slice_budget"],
+    )
+    if min_ratio <= 0.25:
+        return "high"
+    if min_ratio <= 0.5:
+        return "medium"
+    return "low"
+
+
+def _wrap_up_guidance(exhausted: dict[str, bool]) -> str:
+    if exhausted["slice_budget_exhausted"] or exhausted["time_budget_exhausted"]:
+        return BUDGET_EXHAUSTED_GUIDANCE
+    if exhausted["retry_budget_exhausted"]:
+        return RETRY_BUDGET_EXHAUSTED_GUIDANCE
+    return DEFAULT_BUDGET_GUIDANCE
 
 
 def _authorization_payload(
@@ -593,9 +773,16 @@ def mission_lock(
 @mcp.tool()
 def list_recent_receipts(session_id: str, task_id: str = "", limit: int = 10) -> str:
     task_scope = task_id.strip()
-    receipts = store.list_recent_receipts(
-        session_id=session_id, task_id=task_scope or None, limit=max(1, min(limit, 50))
-    )
+    bounded_limit = max(1, min(limit, 50))
+    mission = _mission_or_none(session_id, task_scope) if task_scope else store.get_active_mission(session_id)
+    if mission is None:
+        receipts = store.list_recent_receipts(
+            session_id=session_id, task_id=task_scope or None, limit=bounded_limit
+        )
+    else:
+        receipts = _mission_scope_recent_receipts(
+            session_id, mission.task_id, mission, bounded_limit
+        )
     if not receipts:
         return "No receipts recorded for this scope yet. If host hooks are installed, perform work and inspect again."
     return _format_receipts(receipts)
@@ -638,7 +825,7 @@ def record_user_authorization(
         gate_type="user_authorization",
         approved=True,
         reason="user authorization recorded",
-        after_receipt_seq=store.latest_receipt_seq(session_id, task_id),
+        after_receipt_seq=store.latest_receipt_seq(session_id),
         ttl_seconds=ttl_seconds,
         meta={
             "action_scope": action_scope.strip(),
@@ -677,13 +864,20 @@ def verify_receipt_integrity(
     session_id: str, receipt_ids: list[str], task_id: str = ""
 ) -> str:
     scoped_task = task_id.strip() or None
-    receipt_ids = _string_list(receipt_ids)
+    receipt_ids = _receipt_id_list(receipt_ids)
     _require_unique_receipt_ids(receipt_ids)
-    receipts = store.get_receipts(
-        receipt_ids, session_id=session_id, task_id=scoped_task
-    )
+    if scoped_task is None:
+        receipts = store.get_receipts(receipt_ids, session_id=session_id)
+    else:
+        receipts = _get_mission_scope_receipts(receipt_ids, session_id, scoped_task)
     if not receipts:
-        raise ValueError("Provide at least one valid receipt_id from this scope.")
+        write_debug_log(
+            "verify_receipt_integrity.no_receipts",
+            {"session_id": session_id, "task_id": scoped_task, "receipt_ids": receipt_ids},
+        )
+        raise ValueError(_receipt_scope_error(receipt_ids, session_id, scoped_task))
+    if len(receipts) != len(set(receipt_ids)):
+        raise ValueError(_receipt_scope_error(receipt_ids, session_id, scoped_task))
     results = []
     all_valid = True
     for receipt in receipts:
@@ -711,9 +905,9 @@ def record_stuck_attempt(
     receipt_ids: list[str],
 ) -> str:
     mission = _require_active_mission(session_id, task_id)
-    receipt_ids = _string_list(receipt_ids)
+    receipt_ids = _receipt_id_list(receipt_ids)
     _require_unique_receipt_ids(receipt_ids)
-    receipts = store.get_receipts(receipt_ids, session_id=session_id, task_id=task_id)
+    receipts = _get_mission_scope_receipts(receipt_ids, session_id, task_id)
     if len(receipts) != len(set(receipt_ids)):
         raise ValueError("Every receipt_id must exist and belong to this session/task.")
     stale_receipts = _receipt_epoch_violations(mission, receipts, "stuck attempt")
@@ -755,11 +949,9 @@ def record_decision_record(
     reopen_triggers: list[str] | None = None,
 ) -> str:
     mission = _require_active_mission(session_id, task_id)
-    evidence_receipt_ids = _string_list(evidence_receipt_ids)
+    evidence_receipt_ids = _receipt_id_list(evidence_receipt_ids, "evidence_receipt_ids")
     _require_unique_receipt_ids(evidence_receipt_ids, "evidence_receipt_ids")
-    receipts = store.get_receipts(
-        evidence_receipt_ids, session_id=session_id, task_id=task_id
-    )
+    receipts = _get_mission_scope_receipts(evidence_receipt_ids, session_id, task_id)
     if len(receipts) != len(set(evidence_receipt_ids)):
         raise ValueError(
             "Every evidence_receipt_id must exist and belong to this mission scope."
@@ -798,11 +990,9 @@ def record_counterexample_check(
     surviving_risk: str = "",
 ) -> str:
     mission = _require_active_mission(session_id, task_id)
-    receipt_ids = _string_list(receipt_ids)
+    receipt_ids = _receipt_id_list(receipt_ids)
     _require_unique_receipt_ids(receipt_ids)
-    receipts = store.get_receipts(
-        receipt_ids, session_id=session_id, task_id=task_id
-    )
+    receipts = _get_mission_scope_receipts(receipt_ids, session_id, task_id)
     if len(receipts) != len(set(receipt_ids)):
         raise ValueError(
             "Every receipt_id must exist and belong to this mission scope."
@@ -855,15 +1045,17 @@ def turn_end_gate(
             "work_summary is too short. Describe what actually changed, tested, or ruled out."
         )
 
-    receipt_ids = _string_list(receipt_ids)
+    receipt_ids = _receipt_id_list(receipt_ids)
     _require_unique_receipt_ids(receipt_ids)
-    receipts = store.get_receipts(receipt_ids, session_id=session_id, task_id=task_id)
+    receipts = _get_mission_scope_receipts(receipt_ids, session_id, task_id)
     if not receipts:
-        raise ValueError(
-            "Provide at least one valid receipt_id from actual tool activity for this session/task."
+        write_debug_log(
+            "turn_end_gate.no_receipts",
+            {"session_id": session_id, "task_id": task_id, "receipt_ids": receipt_ids},
         )
+        raise ValueError(_receipt_scope_error(receipt_ids, session_id, task_id))
     if len(receipts) != len(set(receipt_ids)):
-        raise ValueError("One or more receipt_ids are missing or out of scope.")
+        raise ValueError(_receipt_scope_error(receipt_ids, session_id, task_id))
 
     pending = _string_list(pending_actions_identified)
     assumptions = _string_list(assumptions_remaining)
@@ -872,21 +1064,30 @@ def turn_end_gate(
     budget = _budget_snapshot(session_id, task_id, mission)
     violations.extend(_receipt_epoch_violations(mission, receipts, "turn_end_gate"))
 
-    if mission.slice_count >= mission.slice_budget and stop_condition in {
-        "slice_verified",
-        "frontier_exhausted",
-    }:
+    if mission.slice_count >= mission.slice_budget and stop_condition == "slice_verified":
         violations.append(
             "slice_budget is exhausted; refresh the mission or stop legally instead of claiming another verified slice."
         )
     if (
         budget["time_budget_minutes"]
         and budget["time_remaining_minutes"] == 0
-        and stop_condition in {"slice_verified", "frontier_exhausted"}
+        and stop_condition == "slice_verified"
     ):
         violations.append(
             "time budget is exhausted; refresh the mission, complete the task, or stop legally instead of claiming another verified slice."
         )
+
+    notes = mission.notes or {}
+    if notes.get("adversarial_audit_required"):
+        audit_budget = notes.get("adversarial_audit_budget") or {}
+        audit_records = notes.get("adversarial_audit_records") or []
+        if isinstance(audit_budget, dict) and isinstance(audit_records, list) and audit_budget:
+            audit_usage = budget_usage(audit_records, audit_budget)
+            audit_gate = audit_stop_gate(audit_usage, audit_budget, stop_condition)
+            if not audit_gate["allowed"]:
+                violations.append(
+                    f"adversarial audit budget is exhausted; {audit_gate['reason']}"
+                )
 
     if _has_assertion_language(work_summary):
         violations.append(
@@ -1001,7 +1202,7 @@ def completion_gate(
         if not isinstance(entry, dict):
             raise ValueError("criterion_receipt_map entries must be objects.")
         criterion = str(entry.get("criterion", "")).strip()
-        ids = _string_list(entry.get("receipt_ids", []))
+        ids = _receipt_id_list(entry.get("receipt_ids", []))
         if not criterion or not ids:
             raise ValueError(
                 "Each criterion_receipt_map entry must include criterion and receipt_ids."
@@ -1020,13 +1221,13 @@ def completion_gate(
         criterion for criterion in mapping_by_criterion if criterion not in criteria
     ]
 
-    receipts = store.get_receipts(
-        provided_receipt_ids, session_id=session_id, task_id=task_id
-    )
+    receipts = _get_mission_scope_receipts(provided_receipt_ids, session_id, task_id)
     if len(receipts) != len(set(provided_receipt_ids)):
-        raise ValueError(
-            "All referenced receipt_ids must exist and belong to this mission scope."
+        write_debug_log(
+            "completion_gate.missing_receipts",
+            {"session_id": session_id, "task_id": task_id, "receipt_ids": provided_receipt_ids},
         )
+        raise ValueError(_receipt_scope_error(provided_receipt_ids, session_id, task_id))
     receipt_map = {receipt.receipt_id: receipt for receipt in receipts}
 
     violations: list[str] = []
@@ -1064,7 +1265,7 @@ def completion_gate(
     # Stale-evidence guard only applies to criteria that semantically require
     # execution. Pure mutation criteria such as writing or slide updates should
     # not be forced to supply a post-edit execution receipt.
-    latest_mutation_seq = store.latest_tool_seq(session_id, task_id, MUTATION_TOOLS)
+    latest_mutation_seq = _latest_mission_tool_seq(session_id, task_id, mission, MUTATION_TOOLS)
     if latest_mutation_seq > 0:
         for criterion, ids in mapping_by_criterion.items():
             if not _criterion_requires_execution_receipt(criterion):
@@ -1105,7 +1306,7 @@ def completion_gate(
             "Mission requires at least one recorded decision record before completion."
         )
 
-    latest_receipt_seq = store.latest_receipt_seq(session_id, task_id)
+    latest_receipt_seq = _latest_mission_receipt_seq(session_id, task_id, mission)
     violations.extend(_adversarial_audit_violations(mission, latest_receipt_seq))
 
     after_receipt_seq = max(
@@ -1176,9 +1377,7 @@ def export_handoff_packet(session_id: str, task_id: str) -> str:
     mission = _mission_or_none(session_id, task_scope)
     if mission is None:
         return _mission_payload_missing()
-    recent_receipts = store.list_recent_receipts(
-        session_id=session_id, task_id=task_scope, limit=5
-    )
+    recent_receipts = _mission_scope_recent_receipts(session_id, task_scope, mission, 5)
     decisions = store.list_decision_records(session_id, task_scope)
     counterexamples = store.list_counterexample_checks(session_id, task_scope)
     latest_turn = store.latest_approval(session_id, task_scope, gate_type="turn_end_gate")
@@ -1255,7 +1454,7 @@ def export_handoff_packet(session_id: str, task_id: str) -> str:
             session_id, task_scope, latest_authorization
         ),
         "adversarial_audit_status": _adversarial_audit_status(
-            mission, store.latest_receipt_seq(mission.session_id, mission.task_id)
+            mission, _latest_mission_receipt_seq(mission.session_id, mission.task_id, mission)
         ),
         "criterion_coverage": (mission.notes or {}).get("criterion_receipt_map", []),
         "known_risks": (mission.notes or {}).get("known_risks", []),
@@ -1284,7 +1483,7 @@ def mission_status(session_id: str, task_id: str = "") -> str:
     latest_authorization = store.latest_approval(
         mission.session_id, mission.task_id, gate_type="user_authorization"
     )
-    last_receipt_seq = store.latest_receipt_seq(mission.session_id, mission.task_id)
+    last_receipt_seq = _latest_mission_receipt_seq(mission.session_id, mission.task_id, mission)
     attempts = store.list_stuck_attempts(mission.session_id, mission.task_id)
     distinct_attempts = len({attempt.strategy_fingerprint for attempt in attempts})
     decision_count = len(

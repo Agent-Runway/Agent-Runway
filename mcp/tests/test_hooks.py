@@ -475,6 +475,65 @@ class HookTestCase(unittest.TestCase):
         self.assertEqual(len(receipts), 1)
         self.assertIsNone(receipts[0].task_id)
 
+    def test_hook_post_tool_use_maps_unique_active_cwd_when_host_session_id_changes(self) -> None:
+        self.server.mission_lock(
+            "mission-session",
+            "active-task",
+            "goal",
+            ["criterion"],
+            cwd=self.temp_dir.name,
+        )
+        event = {
+            "session_id": "host-session",
+            "cwd": self.temp_dir.name,
+            "tool_name": "Bash",
+            "tool_input": {"command": "pytest -q"},
+            "tool_response": {"exit_code": 0, "stdout": "ok", "stderr": ""},
+            "hook_event_name": "PostToolUse",
+        }
+
+        result = self.hooks.post_tool_use(event)
+
+        self.assertEqual(result, 0)
+        mapped = self.store.list_recent_receipts("mission-session", "active-task", limit=10)
+        orphan = self.store.list_recent_receipts("host-session", limit=10)
+        self.assertEqual(len(mapped), 1)
+        self.assertEqual(mapped[0].task_id, "active-task")
+        self.assertEqual(orphan, [])
+
+    def test_hook_post_tool_use_keeps_taskless_when_cwd_fallback_is_ambiguous(self) -> None:
+        self.server.mission_lock(
+            "mission-session-a",
+            "active-task-a",
+            "goal",
+            ["criterion"],
+            cwd=self.temp_dir.name,
+        )
+        self.server.mission_lock(
+            "mission-session-b",
+            "active-task-b",
+            "goal",
+            ["criterion"],
+            cwd=self.temp_dir.name,
+        )
+        event = {
+            "session_id": "host-session",
+            "cwd": self.temp_dir.name,
+            "tool_name": "Bash",
+            "tool_input": {"command": "pytest -q"},
+            "tool_response": {"exit_code": 0, "stdout": "ok", "stderr": ""},
+            "hook_event_name": "PostToolUse",
+        }
+
+        result = self.hooks.post_tool_use(event)
+
+        self.assertEqual(result, 0)
+        orphan = self.store.list_recent_receipts("host-session", limit=10)
+        self.assertEqual(len(orphan), 1)
+        self.assertIsNone(orphan[0].task_id)
+        self.assertEqual(self.store.list_recent_receipts("mission-session-a", "active-task-a", limit=10), [])
+        self.assertEqual(self.store.list_recent_receipts("mission-session-b", "active-task-b", limit=10), [])
+
     def test_opencode_bridge_denies_secret_read_before_tool_execution(self) -> None:
         bridge = importlib.import_module("opencode_plugin_bridge")
         bridge = importlib.reload(bridge)

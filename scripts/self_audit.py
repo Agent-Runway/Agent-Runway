@@ -197,7 +197,13 @@ def main() -> int:
             contains(refs.get('degradation-modes.md', ''), 'downgrade', 'weak runtime'),
             contains(skill_md, 'degradation mode'),
             contains(server_text, 'degradation_mode'),
-            contains(refs.get('runtime-capability-matrix.md', ''), 'soft mode', 'mcp mode', 'hosted mode'),
+            contains(
+                refs.get('runtime-capability-matrix.md', ''),
+                'soft mode',
+                'mcp mode',
+                'host-assisted mode',
+                'hosted-hook mode',
+            ),
         ],
         'adversarial_robustness': [
             'adversarial-robustness.md' in refs,

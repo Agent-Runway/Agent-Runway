@@ -192,6 +192,45 @@ class IntegrationWorkflowTestCase(unittest.TestCase):
         self.assertEqual(child_rows[0].source, "opencode-plugin")
         self.assertEqual(child_rows[0].task_id, "child-task")
 
+    def test_opencode_after_hook_maps_host_session_by_actual_project_cwd(self) -> None:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is required for OpenCode plugin behavior test")
+        plugin_path = REPO_ROOT / ".opencode" / "plugins" / "agent-runway.js"
+        script = textwrap.dedent(f"""
+            import {{ spawnSync }} from "node:child_process";
+            import {{ pathToFileURL }} from "node:url";
+            const env = {{...process.env, PYTHONPATH: {json.dumps(str(REPO_ROOT / 'mcp'))}}};
+            const py = process.env.ILH_PYTHON || "python3";
+            const lockCode = "import server; server.mission_lock('mission-session','active-task','goal',['criterion'], host='opencode', cwd=" + {json.dumps(repr(str(REPO_ROOT)))} + ")";
+            const lock = spawnSync(py, ["-c", lockCode], {{cwd: {json.dumps(str(REPO_ROOT))}, env, stdio: "inherit"}});
+            if (lock.status !== 0) process.exit(lock.status || 1);
+            const {{ default: plugin }} = await import(pathToFileURL({json.dumps(str(plugin_path))}).href);
+            const server = await plugin.server();
+            await server.event({{event: {{type: "session.created", sessionID: "host-session", info: {{cwd: {json.dumps(str(REPO_ROOT))}}}}}}});
+            await server["tool.execute.before"]({{sessionID: "host-session", tool: "bash", args: {{command: "pytest -q"}}}}, {{}});
+            await server["tool.execute.after"]({{sessionID: "host-session", tool: "bash", args: {{command: "pytest -q"}}}}, {{output: "OK", metadata: {{exitCode: 0}}}});
+        """)
+        env = os.environ.copy()
+        env["ILH_PYTHON"] = sys.executable
+        env["ILH_OPENCODE_BRIDGE"] = "1"
+        proc = subprocess.run(
+            [node, "--input-type=module", "-e", script],
+            cwd=str(REPO_ROOT),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        mapped = self.store.list_recent_receipts("mission-session", "active-task", limit=10)
+        host_rows = self.store.list_recent_receipts("host-session", limit=10)
+        self.assertEqual(len(mapped), 1)
+        self.assertEqual(mapped[0].source, "opencode-plugin")
+        self.assertEqual(host_rows, [])
+
 
 if __name__ == "__main__":
     unittest.main()

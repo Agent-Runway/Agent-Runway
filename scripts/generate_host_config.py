@@ -26,7 +26,16 @@ def resolve_project_dir(raw_path: str) -> Path:
     return Path(raw_path).resolve()
 
 
-def build_claude_code_settings(project_dir: Path, secret_path: str) -> dict:
+def debug_env(project_dir: Path, enabled: bool) -> dict[str, str]:
+    if not enabled:
+        return {}
+    return {
+        "ILH_DEBUG": "1",
+        "ILH_DEBUG_LOG_PATH": str(project_dir / ".agent-runway" / "debug.log"),
+    }
+
+
+def build_claude_code_settings(project_dir: Path, secret_path: str, debug: bool = False) -> dict:
     hook_path = project_dir / "scripts" / "claude_hooks.py"
     db_path = project_dir / ".agent-runway" / "state.db"
     hook_command = subprocess.list2cmdline(["python", str(hook_path)])
@@ -42,6 +51,7 @@ def build_claude_code_settings(project_dir: Path, secret_path: str) -> dict:
         "env": {
             "ILH_DB_PATH": str(db_path),
             "ILH_SECRET_PATH": secret_path,
+            **debug_env(project_dir, debug),
         },
         "hooks": {
             "SessionStart": [
@@ -60,13 +70,14 @@ def build_claude_code_settings(project_dir: Path, secret_path: str) -> dict:
     }
 
 
-def build_mcp_env_settings(project_dir: Path, secret_path: str) -> dict:
+def build_mcp_env_settings(project_dir: Path, secret_path: str, debug: bool = False) -> dict:
     db_path = project_dir / ".agent-runway" / "state.db"
     return {
         "mode": "instructions_only",
         "env": {
             "ILH_DB_PATH": str(db_path),
             "ILH_SECRET_PATH": secret_path,
+            **debug_env(project_dir, debug),
         },
         "note": "For Codex/OpenCode/VSCode/Cursor, configure the MCP server endpoint in your host's MCP settings. "
                 "This output is not a host-native installer. "
@@ -75,7 +86,7 @@ def build_mcp_env_settings(project_dir: Path, secret_path: str) -> dict:
     }
 
 
-def build_opencode_settings(project_dir: Path, secret_path: str) -> dict:
+def build_opencode_settings(project_dir: Path, secret_path: str, debug: bool = False) -> dict:
     server_path = project_dir / "mcp" / "server.py"
     db_path = project_dir / ".agent-runway" / "state.db"
     return {
@@ -89,6 +100,7 @@ def build_opencode_settings(project_dir: Path, secret_path: str) -> dict:
                     "ILH_DB_PATH": str(db_path),
                     "ILH_SECRET_PATH": secret_path,
                     "ILH_OPENCODE_BRIDGE": "0",
+                    **debug_env(project_dir, debug),
                 },
                 "enabled": True,
                 "timeout": 5000,
@@ -128,15 +140,16 @@ def main() -> int:
     parser.add_argument("--project-dir", default=".", help="Project root where the skill is installed")
     parser.add_argument("--secret-path", default="~/.config/agent-runway/secret.key",
                         help="Secret path to deny from reads")
+    parser.add_argument("--debug", action="store_true", help="Write detailed Agent-Runway debug logs under .agent-runway/debug.log")
     args = parser.parse_args()
     project_dir = resolve_project_dir(args.project_dir)
     secret_path = str(Path(args.secret_path).expanduser())
     adapter = get_host_adapter(args.host)
 
     if adapter.config_mode == "hosted_installer":
-        settings = build_claude_code_settings(project_dir, secret_path)
+        settings = build_claude_code_settings(project_dir, secret_path, args.debug)
     elif adapter.config_mode == "host_native_config":
-        settings = build_opencode_settings(project_dir, secret_path)
+        settings = build_opencode_settings(project_dir, secret_path, args.debug)
         settings["host"] = adapter.key
         settings["host_display_name"] = adapter.display_name
     elif adapter.config_mode == "extension_only":
@@ -144,7 +157,7 @@ def main() -> int:
         settings["host"] = adapter.key
         settings["host_display_name"] = adapter.display_name
     else:
-        settings = build_mcp_env_settings(project_dir, secret_path)
+        settings = build_mcp_env_settings(project_dir, secret_path, args.debug)
         settings["host"] = adapter.key
         settings["host_display_name"] = adapter.display_name
 

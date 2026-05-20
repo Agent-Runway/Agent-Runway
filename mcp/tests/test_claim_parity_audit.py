@@ -31,7 +31,7 @@ class ClaimParityAuditTestCase(unittest.TestCase):
                                 "required_tools": [],
                                 "required_scripts": [],
                                 "required_hooks": [],
-                                "min_mode": "hosted",
+                                "min_mode": "hosted-hook",
                             }
                         ]
                     }
@@ -39,8 +39,8 @@ class ClaimParityAuditTestCase(unittest.TestCase):
                 encoding="utf-8",
             )
             (root / "references" / "runtime-capability-matrix.md").write_text(
-                "This document warns that hosted claims should be described carefully.\n"
-                "But it does not declare hosted mode in the capability table.\n"
+                "This document warns that hosted-hook claims should be described carefully.\n"
+                "But it does not declare hosted-hook mode in the capability table.\n"
                 "| Capability | soft mode | mcp mode |\n"
                 "|---|---|---|\n"
                 "| stop gating | advisory only | runtime-backed |\n",
@@ -80,7 +80,7 @@ class ClaimParityAuditTestCase(unittest.TestCase):
                                 "required_tools": [],
                                 "required_scripts": ["scripts/opencode_plugin_bridge.py"],
                                 "required_hooks": ["pre_tool_use"],
-                                "min_mode": "hosted",
+                                "min_mode": "host-assisted",
                             }
                         ]
                     }
@@ -88,7 +88,7 @@ class ClaimParityAuditTestCase(unittest.TestCase):
                 encoding="utf-8",
             )
             (root / "references" / "runtime-capability-matrix.md").write_text(
-                "| Capability | soft mode | hosted mode |\n"
+                "| Capability | soft mode | host-assisted mode |\n"
                 "|---|---|---|\n"
                 "| bridge gate | advisory | enforced |\n",
                 encoding="utf-8",

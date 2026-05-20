@@ -1,6 +1,6 @@
 # Agent-Runway
 
-[![Version](https://img.shields.io/badge/version-v0.35-blue)](../../issues)
+[![Version](https://img.shields.io/badge/version-v0.36-blue)](../../issues)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11+-blue)](https://python.org)
 
@@ -32,16 +32,17 @@ AI を、信頼を浪費する存在ではなく、目標へ進み続ける存�
 | 🚪 Completion gate | すべての基準を receipts に対応付け -> 根拠のない "done" を防ぐ |
 | 💰 Budget discipline | slice/retry/time + 枯渇時の `wrap_up_guidance` -> 無限 retry を防ぐ |
 | 🛡️ Stale-evidence guard | ファイル編集後は再検証が必須 -> "edit then read" による古い evidence の洗浄を防ぐ |
-| 🚫 Assertion blocking | 9 個の regex で "should work" / "probably" / "I believe" を拒否 |
+| 🚫 Assertion blocking | 15 個の regex で "should work" / "probably" / "I believe" を拒否 |
 | 🔬 Counterexample | `record_counterexample_check` -> 仮説 + 反証確認 + 残余リスク |
 | 📝 Decision records | `record_decision_record` -> 選択 + 却下した代替案 + 再オープン条件 |
 | 🔐 Authorization | 不可逆な操作には、記録され、なお有効なユーザー承認が必要 |
 | 🔄 Failure escalation | `record_stuck_attempt` -> 本質的に異なる戦略だけをカウントし、retry budget 枯渇後に escalation |
 | 📦 Handoff packet | どの Host でも使える完全な JSON パケット -> 隠れた記憶に依存しない継続性 |
-| ⛔ Stop enforcement | Claude Code では Stop hook による物理ブロック、Codex/OpenCode では advisory |
+| ⛔ Stop enforcement | Claude Code では Stop hook による物理ブロック、Codex/OpenCode/Pi CLI では advisory |
 | ⚠️ Dangerous command interception | 10 分類 + 複数プラットフォームのパス変種を含む secret path 拒否 |
 | ⚖️ Value Gate | 高 impact・検証可能・低 expansion の場合だけ続行 |
 | 🧠 Project Learning Ledger | プロジェクト固有の pitfalls、runbooks、preferences、invariants を記録するレビュー可能な JSONL。advisory のみで、evidence や authorization にはならない |
+| 🧪 Adversarial Audit Gate | 高リスク completion claims に対する bounded falsification。bug が存在しない証明ではない |
 
 ## 🎯 解決する5つの問題
 
@@ -93,6 +94,8 @@ mission_lock -> bounded slice -> receipt -> turn_end_gate -> repeat -> completio
 現在各 Host について主張している最強モードだけを示します。`🟡 host-specific` は、その追加インターセプトが Host 依存であることを意味します。
 
 OpenCode はデフォルトで native MCP configuration を使います。このリポジトリには `.opencode/plugins/agent-runway.js` として実際の bridge 実装が含まれていますが、OpenCode は skill directory 内の plugin を自動検出しません。ローカル plugin を自動ロードするのは、project の `.opencode/plugins/`、ユーザーの `~/.config/opencode/plugins/`、または Windows の `%USERPROFILE%\.config\opencode\plugins\` だけです。OpenCode の tool events を自動で receipt ledger に転送したい場合は、これらの OpenCode plugin 配置先のどれかに `shim` または `symlink` を置き、skill plugin を再エクスポートさせたうえで `ILH_OPENCODE_BRIDGE=1` を設定してください。これにより receipt capture は改善されます。
+
+Pi CLI support は意図的に狭い範囲です。`python scripts/generate_host_config.py --host pi-cli --project-dir <project-root>` は extension-only note を出すだけで、native MCP configuration は出力しません。検証済みの interception path は、`pi.on("tool_call", ...)` で `{ block: true, reason: "..." }` を返す Pi extension です。`scripts/fixtures/pi_block_extension.js` を参照してください。
 
 ## 🔍 gate はどう判断するか
 
@@ -163,6 +166,7 @@ Agent-Runway のインストールを手伝ってください:
    - Claude Code -> <repo-path>/.claude/settings.json
    - OpenCode -> 実際に使っている OpenCode 設定ファイル。例: ~/.config/opencode/opencode.json, ~/.config/opencode/config.json, %USERPROFILE%\.config\opencode\opencode.json, %USERPROFILE%\.config\opencode\config.json
    - Codex/Cursor -> その host の MCP server 設定にある env セクション
+   - Pi CLI -> extension-only note。native MCP configuration は出力されません
 6. host が OpenCode で、tool-event receipt を自動 capture したい場合は、~/.config/opencode/plugins/agent-runway.js（または %USERPROFILE%\.config\opencode\plugins\agent-runway.js）を作成し、`export { default } from "../skills/agent-runway/.opencode/plugins/agent-runway.js"` を記述する
 7. skill が別の場所にあるなら、この再エクスポート先を実際の skill path に合わせて調整する。shim または symlink を使う。raw plugin file をむやみにコピーしないこと。コピーするなら scripts/opencode_plugin_bridge.py への相対パスも維持すること
 8. 生成した OpenCode 設定または host environment に ILH_OPENCODE_BRIDGE=1 を設定し、OpenCode を再起動する
@@ -200,6 +204,13 @@ python scripts/generate_host_config.py --host opencode --project-dir <project-ro
 python scripts/generate_host_config.py --host <codex|cursor> --project-dir <project-root>
 ```
 
+**Pi CLI:**
+```bash
+python scripts/generate_host_config.py --host pi-cli --project-dir <project-root>
+```
+
+Pi CLI の出力は extension-only capability note であり、native MCP installer ではありません。
+
 #### 2. 設定を対応するファイルへコピーする
 
 **Claude Code:** 出力された JSON をプロジェクトルートの `.claude/settings.json` に merge します。
@@ -232,6 +243,12 @@ python -m unittest discover -s mcp/tests -p "test_*.py"
 python scripts/smoke_test.py
 ```
 
+Claude Code、OpenCode、Node、npm が利用できる場合、host-level blocking evidence を再現できます。
+
+```bash
+python scripts/host_blocking_experiments.py
+```
+
 ### 設定の詳細
 
 **runtime ファイルの既定位置:**
@@ -262,7 +279,8 @@ python scripts/smoke_test.py
 │   ├── release_gate.py              # 16-gate harness
 │   ├── release_static_checks.py     # 静的チェック
 │   ├── project_learning_lint.py     # Project Learning Ledger lint
-│   └── project_learning_query.py    # 制限付き advisory ledger query
+│   ├── project_learning_query.py    # 制限付き advisory ledger query
+│   └── host_blocking_experiments.py # 再現可能な host blocking 実験
 ├── .opencode/
 │   └── plugins/                     # OpenCode 用の任意 bridge
 └── references/                      # architecture, host, budget, receipt, parity, release, project learning
@@ -277,6 +295,7 @@ python scripts/smoke_test.py
 - Host Hooks がある場合、危険な shell command は実行前に確認を要求します
 - Host Hooks がある場合、gate 承認後に新しい receipt が追加されると、その承認は古くなり、`Stop` には新しい gate decision が必要になります
 - OpenCode `ask` は fail-closed であり、ネイティブの確認ダイアログではありません
+- Pi CLI support は extension-only です。検証済みなのは `tool_call` blocking であり、native MCP や Stop hook parity ではありません
 - Codex、Cursor はこのリポジトリでは MCP パスです
 - Project Learning Ledger は advisory context のみです。memory は evidence ではなく、preference は authorization ではありません
 

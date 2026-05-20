@@ -181,6 +181,44 @@ class OpenCodePluginTests(unittest.TestCase):
             self.assertEqual(payload["PYTHONDONTWRITEBYTECODE"], "1")
             self.assertFalse((script_dir / "__pycache__").exists())
 
+    def test_plugin_forces_python_bytecode_env_even_when_process_disables_it(self) -> None:
+        require_node(self)
+        with tempfile.TemporaryDirectory(prefix="agent-runway-opencode-bytecode-override-") as raw:
+            tmp = Path(raw)
+            plugin_dir, _script_dir = write_bytecode_capture_runtime(tmp)
+            capture = tmp / "bridge-env.json"
+            runner = tmp / "run-plugin.mjs"
+            write_bytecode_runner(runner)
+            env = clean_env("ILH_DB_PATH", "ILH_SECRET_PATH", "ILH_OPENCODE_BRIDGE")
+            env.update({
+                "AGENT_RUNWAY_OPENCODE_PLUGIN": str(plugin_dir / "agent-runway.js"),
+                "BRIDGE_ENV_CAPTURE": str(capture),
+                "OPENCODE_CONFIG_CONTENT": json.dumps(agent_runway_config(tmp / "configured-state.db")),
+                "PYTHONDONTWRITEBYTECODE": "0",
+            })
+            proc = run_process(["node", str(runner)], tmp, env)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            payload = json.loads(capture.read_text(encoding="utf-8"))
+            self.assertEqual(payload["PYTHONDONTWRITEBYTECODE"], "1")
+
+    def test_python_bridge_forces_bytecode_env_on_import(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="agent-runway-bridge-bytecode-override-") as raw:
+            tmp = Path(raw)
+            scripts_dir, _mcp_dir = copy_bridge_runtime(tmp / "repo")
+            project_dir = tmp / "project"
+            project_dir.mkdir()
+            env = clean_env("ILH_DB_PATH", "ILH_SECRET_PATH", "OPENCODE_CONFIG_CONTENT")
+            env["PYTHONDONTWRITEBYTECODE"] = "0"
+            code = (
+                "import os, sys; "
+                f"sys.path.insert(0, {str(scripts_dir)!r}); "
+                "import opencode_plugin_bridge; "
+                "print(os.environ.get('PYTHONDONTWRITEBYTECODE'))"
+            )
+            proc = run_process([sys.executable, "-c", code], project_dir, env)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual(proc.stdout.strip(), "1")
+
     def test_python_bridge_loads_config_environment_before_hooks_import(self) -> None:
         with tempfile.TemporaryDirectory(prefix="agent-runway-bridge-env-") as raw:
             tmp = Path(raw)
@@ -205,8 +243,88 @@ class OpenCodePluginTests(unittest.TestCase):
             self.assertTrue(configured_db.exists())
             self.assertFalse((project_dir / ".agent-runway" / "state.db").exists())
             self.assertFalse((scripts_dir / "__pycache__").exists())
-            self.assertFalse((mcp_dir / "agent_runway_runtime" / "__pycache__").exists())
+        self.assertFalse((mcp_dir / "agent_runway_runtime" / "__pycache__").exists())
 
+    def test_plugin_and_bridge_load_trailing_comma_opencode_config(self) -> None:
+        require_node(self)
+        with tempfile.TemporaryDirectory(prefix="agent-runway-opencode-jsonc-") as raw:
+            tmp = Path(raw)
+            runtime_root = tmp / "runtime"
+            project_dir = runtime_root / "project"
+            config_dir = project_dir / ".opencode"
+            config_dir.mkdir(parents=True)
+            scripts_dir, mcp_dir = copy_bridge_runtime(runtime_root)
+            plugin_dir = runtime_root / ".opencode" / "plugins"
+            plugin_dir.mkdir(parents=True)
+            shutil.copyfile(PLUGIN_PATH, plugin_dir / "agent-runway.js")
+            configured_db = tmp / "configured-state.db"
+            config_dir.joinpath("opencode.json").write_text(
+                '{\n  "mcp": {\n    "agent-runway": {\n      "environment": {\n        "ILH_DB_PATH": ' + json.dumps(str(configured_db)) + ',\n        "ILH_OPENCODE_BRIDGE": "1",\n      },\n    },\n  },\n}\n',
+                encoding="utf-8",
+            )
+            runner = tmp / "run-plugin.mjs"
+            write_plugin_session_runner(runner)
+            env = clean_env("ILH_DB_PATH", "ILH_SECRET_PATH", "ILH_OPENCODE_BRIDGE", "OPENCODE_CONFIG_CONTENT")
+            env.update({
+                "AGENT_RUNWAY_OPENCODE_PLUGIN": str(plugin_dir / "agent-runway.js"),
+                "CONFIGURED_DB_PATH": str(configured_db),
+                "PROJECT_CWD": str(project_dir),
+                "PYTHONPATH": str(scripts_dir),
+            })
+            proc = run_process(["node", str(runner)], project_dir, env)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            payload = json.loads(proc.stdout)
+            self.assertTrue(payload["configuredStateExists"])
+            self.assertFalse(payload["defaultStateExists"])
+        self.assertFalse((mcp_dir / "agent_runway_runtime" / "__pycache__").exists())
+
+    def test_plugin_filters_empty_bridge_environment_keys(self) -> None:
+        require_node(self)
+        with tempfile.TemporaryDirectory(prefix="agent-runway-opencode-empty-env-") as raw:
+            tmp = Path(raw)
+            plugin_dir = tmp / ".opencode" / "plugins"
+            scripts_dir = tmp / "scripts"
+            plugin_dir.mkdir(parents=True)
+            scripts_dir.mkdir()
+            shutil.copyfile(PLUGIN_PATH, plugin_dir / "agent-runway.js")
+            capture = tmp / "bridge-env.json"
+            (scripts_dir / "opencode_plugin_bridge.py").write_text(
+                textwrap.dedent(
+                    """
+                    import json
+                    import os
+                    import sys
+
+                    Path = __import__("pathlib").Path
+                    Path(os.environ["BRIDGE_ENV_CAPTURE"]).write_text(
+                        json.dumps({
+                            "has_empty_key": "" in os.environ,
+                            "ILH_DB_PATH": os.environ.get("ILH_DB_PATH"),
+                        }),
+                        encoding="utf-8",
+                    )
+                    sys.stdout.write(json.dumps({"recorded": True}))
+                    """
+                ),
+                encoding="utf-8",
+            )
+            runner = tmp / "run-plugin.mjs"
+            write_bytecode_runner(runner)
+            env = clean_env("ILH_DB_PATH", "ILH_SECRET_PATH", "ILH_OPENCODE_BRIDGE")
+            env.update({
+                "AGENT_RUNWAY_OPENCODE_PLUGIN": str(plugin_dir / "agent-runway.js"),
+                "BRIDGE_ENV_CAPTURE": str(capture),
+                "OPENCODE_CONFIG_CONTENT": json.dumps(
+                    {"mcp": {"agent-runway": {"environment": {"ILH_DB_PATH": str(tmp / "state.db"), "": "bad", "ILH_OPENCODE_BRIDGE": "1"}}}}
+                ),
+            })
+
+            proc = run_process(["node", str(runner)], tmp, env)
+
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            payload = json.loads(capture.read_text(encoding="utf-8"))
+            self.assertFalse(payload["has_empty_key"])
+            self.assertEqual(str(tmp / "state.db"), payload["ILH_DB_PATH"])
 
 if __name__ == "__main__":
     unittest.main()

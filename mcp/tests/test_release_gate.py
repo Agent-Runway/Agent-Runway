@@ -33,6 +33,54 @@ def load_script_module(name: str):
     return module
 
 
+def adversarial_audit_required_artifacts() -> list[str]:
+    return [
+        "references/adversarial-audit.md",
+        "references/adversarial-audit-rubric.md",
+        "references/adversarial-audit-threat-model.md",
+        "references/adversarial-audit-schema.json",
+        "references/adversarial-audit-examples.md",
+        "references/adversarial-audit-profiles.json",
+        "scripts/adversarial_audit_lint.py",
+        "scripts/adversarial_audit_suite.py",
+        "mcp/agent_runway_runtime/adversarial_audit.py",
+        "mcp/agent_runway_runtime/adversarial_audit_plan_edges.py",
+        "mcp/agent_runway_runtime/adversarial_audit_reading.py",
+        "mcp/tests/test_adversarial_audit.py",
+        "mcp/tests/test_adversarial_audit_plan_edges.py",
+        "mcp/tests/test_adversarial_audit_direct_helper_edges.py",
+        "mcp/tests/test_adversarial_audit_read_errors.py",
+        "mcp/tests/test_adversarial_audit_type_edges.py",
+    ]
+
+
+def opencode_bridge_required_artifacts() -> list[str]:
+    return [
+        ".opencode/plugins/agent-runway.js",
+        "scripts/opencode_plugin_bridge.py",
+        "mcp/tests/test_opencode_plugin.py",
+        "mcp/tests/test_opencode_bridge_jsonc_parser.py",
+        "mcp/tests/test_opencode_bridge_payload_edges.py",
+        "mcp/tests/test_opencode_plugin_jsonc_edges.py",
+        "mcp/tests/test_opencode_plugin_duration_edges.py",
+        "mcp/tests/test_release_gate.py",
+        "mcp/tests/test_hooks.py",
+        "mcp/tests/test_hook_payload_edges.py",
+        "mcp/tests/test_debug_logging.py",
+    ]
+
+
+def host_risk_interception_required_artifacts() -> list[str]:
+    return [
+        "scripts/claude_hooks.py",
+        "mcp/agent_runway_runtime/debug_logging.py",
+        "mcp/tests/test_hooks.py",
+        "mcp/tests/test_hook_payload_edges.py",
+        "mcp/tests/test_debug_logging.py",
+        "references/runtime-capability-matrix.md",
+    ]
+
+
 class ReleaseGateTestCase(unittest.TestCase):
     def test_release_gate_declares_all_sixteen_mandatory_gates(self) -> None:
         module = load_release_gate_module()
@@ -86,6 +134,51 @@ class ReleaseGateTestCase(unittest.TestCase):
         self.assertFalse(passed)
         self.assertIn("missing project learning artifact: scripts/project_learning_query.py", issues)
 
+    def test_release_static_check_adversarial_audit_valid_requires_edge_artifacts(self) -> None:
+        module = load_script_module("release_static_checks")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for rel in adversarial_audit_required_artifacts()[:-1]:
+                path = root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("bounded falsification\nnever proves absence of bugs\nNo full multi-agent scheduler\n", encoding="utf-8")
+
+            passed, issues = module.check(root, "adversarial_audit_valid")
+
+        self.assertFalse(passed)
+        self.assertIn(
+            "missing adversarial audit artifact: mcp/tests/test_adversarial_audit_type_edges.py",
+            issues,
+        )
+
+    def test_runtime_manifest_adversarial_claim_lists_edge_artifacts(self) -> None:
+        manifest = json.loads((REPO_ROOT / "references" / "runtime-claim-manifest.json").read_text(encoding="utf-8"))
+        claim = next(item for item in manifest["claims"] if item["id"] == "adversarial-audit-gate")
+
+        for rel in adversarial_audit_required_artifacts():
+            self.assertIn(rel, claim["required_files"])
+
+    def test_runtime_manifest_opencode_claim_lists_edge_artifacts(self) -> None:
+        manifest = json.loads((REPO_ROOT / "references" / "runtime-claim-manifest.json").read_text(encoding="utf-8"))
+        claim = next(item for item in manifest["claims"] if item["id"] == "opencode-plugin-bridge")
+
+        for rel in opencode_bridge_required_artifacts():
+            self.assertIn(rel, claim["required_files"])
+
+    def test_runtime_manifest_host_risk_claim_lists_payload_edge_artifacts(self) -> None:
+        manifest = json.loads((REPO_ROOT / "references" / "runtime-claim-manifest.json").read_text(encoding="utf-8"))
+        claim = next(item for item in manifest["claims"] if item["id"] == "host-risk-interception")
+
+        for rel in host_risk_interception_required_artifacts():
+            self.assertIn(rel, claim["required_files"])
+
+    def test_runtime_manifest_receipt_claim_lists_scope_edge_artifacts(self) -> None:
+        manifest = json.loads((REPO_ROOT / "references" / "runtime-claim-manifest.json").read_text(encoding="utf-8"))
+        claim = next(item for item in manifest["claims"] if item["id"] == "receipt-integrity")
+
+        self.assertIn("mcp/tests/test_receipt_scope_edges.py", claim["required_files"])
+        self.assertIn("mcp/tests/test_receipt_scope_validation_edges.py", claim["required_files"])
+
     def test_release_static_check_release_report_and_version_demands_v036_and_16_gates(self) -> None:
         module = load_script_module("release_static_checks")
         with tempfile.TemporaryDirectory() as td:
@@ -136,6 +229,8 @@ class ReleaseGateTestCase(unittest.TestCase):
                 "mcp/tests/test_adversarial_audit.py",
                 "mcp/tests/test_generate_host_config.py",
                 "mcp/tests/test_runtime_regressions.py",
+                "mcp/tests/test_receipt_scope_edges.py",
+                "mcp/tests/test_receipt_scope_validation_edges.py",
                 "scripts/host_blocking_experiments.py",
                 "scripts/fixtures/pi_block_extension.js",
                 "scripts/fixtures/opencode_block_experiment.mjs",

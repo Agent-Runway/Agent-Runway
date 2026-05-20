@@ -56,7 +56,7 @@ Use [references/project-learning-ledger-policy.md](references/project-learning-l
 - preference is not authorization
 - read at most 3-5 relevant records before the task
 - when updating project learning, do it through file edits plus lint and review rather than runtime MCP write tools
-- do not expose or imply runtime MCP write tools for project learning in v0.35
+- do not expose or imply runtime MCP write tools for project learning in v0.36
 
 ## Adversarial Audit Gate
 

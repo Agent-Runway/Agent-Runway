@@ -54,7 +54,7 @@ HOST_ADAPTERS: dict[str, HostAdapter] = {
     "pi-cli": HostAdapter(
         key="pi-cli",
         display_name="Pi CLI",
-        hosted_hooks_supported=True,
+        hosted_hooks_supported=False,
         native_mcp_config_supported=False,
         stop_blocking_supported=False,
         config_mode="extension_only",

@@ -32,7 +32,7 @@ Read this as the capability snapshot first; the five-problem table right after i
 | 🚪 Completion gate | Every criterion mapped to receipts -> no unsupported "done" |
 | 💰 Budget discipline | Slice/retry/time + `wrap_up_guidance` on exhaustion -> no infinite retry theater |
 | 🛡️ Stale-evidence guard | After file edits, must re-verify -> prevents "edit then read" laundering |
-| 🚫 Assertion blocking | 9 regex patterns reject "should work" / "probably" / "I believe" |
+| 🚫 Assertion blocking | 15 regex patterns reject "should work" / "probably" / "I believe" |
 | 🔬 Counterexample | `record_counterexample_check` -> hypothesis + disconfirmers + surviving risk |
 | 📝 Decision records | `record_decision_record` -> choice + rejected alternatives + reopen triggers |
 | 🔐 Authorization | Irreversible actions require recorded, freshness-aware user approval |

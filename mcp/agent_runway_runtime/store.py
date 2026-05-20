@@ -32,6 +32,10 @@ def ensure_directory(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
+def normalize_cwd(cwd: str) -> str:
+    return str(Path(cwd or ".").expanduser().resolve())
+
+
 def tighten_windows_file_acl(path: Path) -> bool:
     current_user = os.environ.get("USERNAME") or os.environ.get("USER")
     if not current_user:
@@ -177,24 +181,28 @@ class RuntimeStore:
             pass
         if sys.platform.startswith("win"):
             acl_tightened = tighten_windows_file_acl(path)
-            mode = path.stat().st_mode & 0o777
             if not acl_tightened:
-                sys.stderr.write(
-                    f"[ILH WARNING] Windows secret ACL was not tightened by chmod; current mode is {oct(mode)} for {path}.\n"
+                path.unlink(missing_ok=True)
+                raise PermissionError(
+                    f"Windows secret ACL could not be tightened for {path}; refusing to continue."
                 )
         return value
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        wal_row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
-        if wal_row and wal_row["journal_mode"] != "wal":
-            sys.stderr.write(
-                f"[ILH WARNING] SQLite journal_mode is {wal_row['journal_mode']!r} instead of 'wal'; "
-                f"concurrent behavior may differ on this filesystem.\n"
-            )
-        conn.execute("PRAGMA foreign_keys=ON")
-        conn.execute("PRAGMA busy_timeout=5000")
+        try:
+            conn.row_factory = sqlite3.Row
+            wal_row = conn.execute("PRAGMA journal_mode=WAL").fetchone()
+            if wal_row and wal_row["journal_mode"] != "wal":
+                sys.stderr.write(
+                    f"[ILH WARNING] SQLite journal_mode is {wal_row['journal_mode']!r} instead of 'wal'; "
+                    f"concurrent behavior may differ on this filesystem.\n"
+                )
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA busy_timeout=5000")
+        except Exception:
+            conn.close()
+            raise
         return conn
 
     def _init_db(self) -> None:
@@ -491,8 +499,8 @@ class RuntimeStore:
         notes_with_epoch = dict(notes or {})
         with closing(self._connect()) as conn, conn:
             row = conn.execute(
-                "SELECT COALESCE(MAX(seq), 0) AS seq FROM receipts WHERE session_id=? AND task_id=?",
-                (session_id, task_id),
+                "SELECT COALESCE(MAX(seq), 0) AS seq FROM receipts WHERE session_id=?",
+                (session_id,),
             ).fetchone()
             notes_with_epoch["mission_start_receipt_seq"] = int(row["seq"] if row else 0)
             conn.execute(
@@ -582,6 +590,26 @@ class RuntimeStore:
                 (session_id,),
             ).fetchone()
         return self._row_to_mission(row) if row else None
+
+    def get_latest_active_mission_by_cwd(self, cwd: str) -> MissionRecord | None:
+        normalized_cwd = normalize_cwd(cwd)
+        with closing(self._connect()) as conn, conn:
+            rows = conn.execute(
+                """
+                SELECT missions.*, sessions.cwd AS session_cwd
+                FROM missions
+                JOIN sessions ON sessions.session_id = missions.session_id
+                WHERE missions.status='active'
+                ORDER BY missions.updated_at DESC
+                """,
+            ).fetchall()
+        matches = [row for row in rows if normalize_cwd(row["session_cwd"]) == normalized_cwd]
+        return self._single_mission_or_none(matches)
+
+    def _single_mission_or_none(self, rows: list[sqlite3.Row]) -> MissionRecord | None:
+        if len(rows) != 1:
+            return None
+        return self._row_to_mission(rows[0])
 
     def _row_to_mission(self, row: sqlite3.Row) -> MissionRecord:
         return MissionRecord(

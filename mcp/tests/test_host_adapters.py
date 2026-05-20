@@ -93,7 +93,7 @@ class HostAdapterTestCase(unittest.TestCase):
 
         self.assertEqual(pi_cli.key, "pi-cli")
         self.assertEqual(pi_cli.config_mode, "extension_only")
-        self.assertTrue(pi_cli.hosted_hooks_supported)
+        self.assertFalse(pi_cli.hosted_hooks_supported)
         self.assertFalse(pi_cli.native_mcp_config_supported)
         self.assertFalse(pi_cli.stop_blocking_supported)
 

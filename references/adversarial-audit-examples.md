@@ -27,7 +27,7 @@ These records are deterministic fixtures for `scripts/adversarial_audit_lint.py`
       "max_output_bytes": 10000,
       "max_generated_artifacts": 1
     },
-    "freshness_baseline": {"latest_receipt_seq": 3},
+    "freshness_baseline": {"latest_receipt_seq": 3, "timestamp": "2026-05-09T00:00:00Z"},
     "created_at": "2026-05-09T00:00:00Z",
     "source_refs": [{"kind": "file", "path": "mcp/server.py", "summary": "runtime gate target"}]
   },
@@ -46,6 +46,7 @@ These records are deterministic fixtures for `scripts/adversarial_audit_lint.py`
     "observed_result": "The gate rejected stale evidence.",
     "outcome": "attack_succeeded",
     "residual_risk": "Only deterministic stale receipt path covered.",
+    "timestamp": "2026-05-09T00:00:01Z",
     "created_at": "2026-05-09T00:00:01Z"
   },
   {

@@ -1,85 +1,46 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
-RECORD_TYPES = {
-    "audit_plan",
-    "audit_attempt",
-    "audit_finding",
-    "audit_disposition",
-    "audit_acceptance",
-    "audit_update",
-}
-ATTACK_TYPES = {
-    "stale_evidence",
-    "mission_epoch",
-    "authorization_freshness",
-    "receipt_replay_collision",
-    "evidence_type_mismatch",
-    "assertion_laundering",
-    "budget_bypass",
-    "counterexample_gap",
-    "host_capability_overclaim",
-    "secret_path_bypass",
-    "opencode_bridge_gap",
-    "project_learning_poisoning",
-    "release_gate_drift",
-    "concurrency_race",
-    "install_config_drift",
-}
-PROFILES = {
-    "runtime_gate_adversary",
-    "host_harness_adversary",
-    "release_claim_adversary",
-    "project_learning_adversary",
-    "platform_adversary",
-    "concurrency_adversary",
-    "install_adversary",
-}
-SEVERITIES = {"critical", "high", "medium", "low", "info", "none"}
-DISPOSITIONS = {
-    "blocking",
-    "must_fix_before_release",
-    "accepted_residual_risk",
-    "needs_reproduction",
-    "false_positive",
-    "non_blocking",
-}
-BLOCKING_SEVERITIES = {"critical", "high"}
-BANNED_PHRASES = (
-    "proved safe",
-    "proves safe",
-    "all vulnerabilities eliminated",
-    "no vulnerabilities",
-    "no bugs",
-    "guaranteed secure",
-    "proved correctness",
-    "证明安全",
-    "不存在漏洞",
-    "证明不存在 bug",
+from .adversarial_audit_budgeting import _fresh_billable_attempts, audit_stop_gate, budget_usage
+from .adversarial_audit_common import nonempty_list, nonempty_string_list, parse_time, record_claims
+from .adversarial_audit_resolution import (
+    blocking_finding_resolution_status,
+    has_acceptance,
+    unresolved_blockers,
 )
-SECRET_PATTERNS = (
-    re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
-    re.compile(r"\bBearer\s+[A-Za-z0-9._~+/-]{20,}"),
-    re.compile(r"\b(?:sk|ghp|glpat)-[A-Za-z0-9_\-]{16,}"),
+from .adversarial_audit_plan_edges import (
+    has_parseable_baseline_timestamp,
+    latest_receipt_seq_baselines,
+    lint_attempt_plan_id,
+    lint_freshness_baseline,
+    lint_record_ids,
+    lint_timestamp_timezone,
+    records_for_known_plans,
 )
-DESTRUCTIVE_PATTERNS = ("rm -rf /", "git push", "curl http://169.254.169.254")
-
-
-def read_records(paths: list[Path]) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    for path in paths:
-        records.extend(_read_one(path))
-    return records
+from .adversarial_audit_reading import read_records
+from .adversarial_audit_schema import (
+    ATTACK_TYPES,
+    BANNED_PHRASES,
+    BLOCKING_SEVERITIES,
+    BUDGET_FIELDS,
+    DESTRUCTIVE_PATTERNS,
+    DISPOSITIONS,
+    PROFILES,
+    RECORD_TYPES,
+    SECRET_PATTERNS,
+    SEVERITIES,
+)
 
 
 def lint_records(records: list[dict[str, Any]]) -> list[str]:
     issues: list[str] = []
     ids = _index(records, issues)
     for record in records:
+        if not isinstance(record, dict):
+            continue
         _lint_record(record, records, ids, issues)
     return issues
 
@@ -91,35 +52,29 @@ def gate_violations(
     latest_receipt_seq: int,
 ) -> list[str]:
     issues = lint_records(records)
+    plans = [r for r in _object_records(records) if r.get("record_type") == "audit_plan"]
+    if not plans:
+        issues.append("adversarial audit required but no audit_plan was provided")
+        return issues
+    fresh_attempts = _fresh_billable_attempts(records_for_known_plans(records, plans), plans)
+    _check_required_profiles(fresh_attempts, required_profiles, issues)
+    _check_required_claims(fresh_attempts, required_claims, issues)
+    _check_freshness(plans, latest_receipt_seq, issues)
     if issues:
         return issues
-    plans = [r for r in records if r.get("record_type") == "audit_plan"]
-    if not plans:
-        return ["adversarial audit required but no audit_plan was provided"]
-    violations: list[str] = []
-    _check_required_profiles(records, required_profiles, violations)
-    _check_required_claims(records, required_claims, violations)
-    _check_freshness(plans, latest_receipt_seq, violations)
-    for item in unresolved_blockers(records):
-        violations.append(
+    resolution_status = blocking_finding_resolution_status(records)
+    for item in resolution_status["unresolved"]:
+        issues.append(
             f"unresolved blocking adversarial finding {item.get('finding_id')}: {item.get('required_action', '')}"
         )
-    return violations
-
-
-def unresolved_blockers(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [
-        record
-        for record in records
-        if record.get("record_type") == "audit_finding" and record.get("disposition") == "blocking"
-    ]
+    return issues
 
 
 def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
     counts: dict[str, int] = {}
     blockers = unresolved_blockers(records)
     for record in records:
-        key = str(record.get("disposition") or record.get("record_type"))
+        key = "malformed_record" if not isinstance(record, dict) else str(record.get("disposition") or record.get("record_type"))
         counts[key] = counts.get(key, 0) + 1
     return {
         "record_count": len(records),
@@ -127,32 +82,6 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
         "unresolved_blockers": [item.get("finding_id") for item in blockers],
         "passed": not blockers and not lint_records(records),
     }
-
-
-def _read_one(path: Path) -> list[dict[str, Any]]:
-    text = path.read_text(encoding="utf-8")
-    stripped = text.strip()
-    if not stripped:
-        return []
-    if path.suffix == ".md":
-        return _records_from_markdown(stripped)
-    if path.suffix == ".json":
-        data = json.loads(stripped)
-        if isinstance(data, dict) and "$schema" in data and "properties" in data:
-            return []
-        return data if isinstance(data, list) else [data]
-    if stripped.startswith("["):
-        data = json.loads(stripped)
-        return data if isinstance(data, list) else [data]
-    return [json.loads(line) for line in stripped.splitlines() if line.strip()]
-
-
-def _records_from_markdown(text: str) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
-    for match in re.finditer(r"```json\s*(.*?)\s*```", text, flags=re.DOTALL):
-        data = json.loads(match.group(1))
-        records.extend(data if isinstance(data, list) else [data])
-    return records
 
 
 def _index(records: list[dict[str, Any]], issues: list[str]) -> dict[str, dict[str, Any]]:
@@ -167,6 +96,10 @@ def _index(records: list[dict[str, Any]], issues: list[str]) -> dict[str, dict[s
                 issues.append(f"duplicate audit record id: {record_id}")
             ids[record_id] = record
     return ids
+
+
+def _object_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [record for record in records if isinstance(record, dict)]
 
 
 def _record_id(record: dict[str, Any]) -> str:
@@ -193,10 +126,13 @@ def _lint_record(
         issues.append(f"unknown audit record_type: {record_type!r}")
         return
     _lint_text(record, issues)
+    _lint_record_timestamp(record, issues)
+    lint_record_ids(record, issues)
+    _lint_claim_fields(record, issues)
     if record_type == "audit_plan":
         _lint_plan(record, issues)
     if record_type == "audit_attempt":
-        _lint_attempt(record, issues)
+        _lint_attempt(record, ids, issues)
     if record_type == "audit_finding":
         _lint_finding(record, records, ids, issues)
     if record_type == "audit_acceptance":
@@ -208,12 +144,18 @@ def _lint_record(
 def _lint_plan(record: dict[str, Any], issues: list[str]) -> None:
     scope = record.get("audit_scope") if isinstance(record.get("audit_scope"), dict) else {}
     budget = record.get("audit_budget") if isinstance(record.get("audit_budget"), dict) else {}
+    baseline = record.get("freshness_baseline") or {}
     for field in ("target_claims", "target_files", "allowed_attack_types", "excluded_actions"):
         if not _nonempty_list(scope.get(field)):
             issues.append(f"audit_plan requires audit_scope.{field}")
     for field in _budget_fields():
         if not isinstance(budget.get(field), int) or budget.get(field) < 1:
             issues.append(f"audit_plan requires audit_budget.{field} >= 1")
+    lint_freshness_baseline(baseline, issues)
+    if not has_parseable_baseline_timestamp(baseline):
+        issues.append("audit_plan requires parseable freshness_baseline.timestamp")
+    elif isinstance(baseline, dict):
+        lint_timestamp_timezone(baseline.get("timestamp"), issues)
     for profile in record.get("profiles_required", []):
         if profile not in PROFILES:
             issues.append(f"unknown adversarial profile: {profile}")
@@ -222,7 +164,18 @@ def _lint_plan(record: dict[str, Any], issues: list[str]) -> None:
             issues.append(f"unknown attack_type in audit_scope: {attack}")
 
 
-def _lint_attempt(record: dict[str, Any], issues: list[str]) -> None:
+def _lint_record_timestamp(record: dict[str, Any], issues: list[str]) -> None:
+    if "timestamp" in record:
+        lint_timestamp_timezone(record.get("timestamp"), issues)
+
+
+def _lint_claim_fields(record: dict[str, Any], issues: list[str]) -> None:
+    for field in ("target_claims", "affected_claims"):
+        if field in record and not _string_list(record.get(field)):
+            issues.append(f"{field} entries must be non-empty strings")
+
+
+def _lint_attempt(record: dict[str, Any], ids: dict[str, dict[str, Any]], issues: list[str]) -> None:
     attack_type = record.get("attack_type")
     outcome = record.get("outcome")
     receipts = record.get("execution_receipts") or []
@@ -230,9 +183,12 @@ def _lint_attempt(record: dict[str, Any], issues: list[str]) -> None:
         issues.append(f"unknown attack_type: {attack_type}")
     if record.get("profile") not in PROFILES:
         issues.append(f"unknown adversarial profile: {record.get('profile')}")
-    if outcome in {"attack_succeeded", "attack_failed"} and not _nonempty_list(receipts):
+    lint_attempt_plan_id(record, ids, issues)
+    if outcome in {"attack_succeeded", "attack_failed"} and not _nonempty_receipts(receipts):
         issues.append("audit_attempt with attack outcome requires execution_receipts")
-    if _uses_project_learning(record) and not _nonempty_list(receipts):
+    if outcome in {"attack_succeeded", "attack_failed"} and parse_time(record.get("timestamp")) is None:
+        issues.append("audit_attempt with attack outcome requires parseable timestamp")
+    if _uses_project_learning(record) and not _nonempty_receipts(receipts):
         issues.append("Project Learning Ledger cannot satisfy adversarial evidence")
 
 
@@ -254,9 +210,9 @@ def _lint_finding(
 def _lint_blocking(record: dict[str, Any], ids: dict[str, dict[str, Any]], severity: str, issues: list[str]) -> None:
     if severity not in BLOCKING_SEVERITIES:
         issues.append("blocking finding requires critical/high severity")
-    attempts = [ids.get(item) for item in record.get("linked_attempt_ids", [])]
+    attempts = [ids.get(item) for item in record.get("linked_attempt_ids", []) if isinstance(item, str)]
     has_evidence = any(
-        attempt and attempt.get("outcome") == "attack_succeeded" and _nonempty_list(attempt.get("execution_receipts"))
+        attempt and attempt.get("outcome") == "attack_succeeded" and nonempty_string_list(attempt.get("execution_receipts"))
         for attempt in attempts
     )
     if not has_evidence:
@@ -264,7 +220,7 @@ def _lint_blocking(record: dict[str, Any], ids: dict[str, dict[str, Any]], sever
 
 
 def _lint_acceptance(record: dict[str, Any], issues: list[str]) -> None:
-    if not str(record.get("accepted_scope", "")).strip():
+    if not isinstance(record.get("accepted_scope"), str) or not record.get("accepted_scope", "").strip():
         issues.append("audit_acceptance requires accepted_scope")
     if not str(record.get("reason", "")).strip():
         issues.append("audit_acceptance requires reason")
@@ -277,6 +233,8 @@ def _lint_update(record: dict[str, Any], ids: dict[str, dict[str, Any]], issues:
         issues.append(f"audit_update targets unknown record: {record.get('target_id')}")
     if not str(record.get("reason", "")).strip():
         issues.append("audit_update requires reason")
+    if "new_disposition" in record and record.get("new_disposition") not in DISPOSITIONS:
+        issues.append(f"unknown new_disposition: {record.get('new_disposition')}")
 
 
 def _lint_text(record: dict[str, Any], issues: list[str]) -> None:
@@ -293,39 +251,44 @@ def _lint_text(record: dict[str, Any], issues: list[str]) -> None:
         issues.append("destructive or disallowed command in audit record")
 
 
-def _check_required_profiles(records: list[dict[str, Any]], required: list[str], issues: list[str]) -> None:
-    covered = {r.get("profile") for r in records if r.get("record_type") == "audit_attempt"}
+def _check_required_profiles(attempts: list[dict[str, Any]], required: list[str], issues: list[str]) -> None:
+    covered = {attempt.get("profile") for attempt in attempts}
     missing = [profile for profile in required if profile not in covered]
     if missing:
         issues.append(f"missing required adversarial profiles: {missing}")
 
 
-def _check_required_claims(records: list[dict[str, Any]], required: list[str], issues: list[str]) -> None:
-    covered = {claim for r in records for claim in r.get("target_claims", r.get("affected_claims", []))}
+def _check_required_claims(attempts: list[dict[str, Any]], required: list[str], issues: list[str]) -> None:
+    covered = {
+        claim
+        for attempt in attempts
+        for claim in record_claims(attempt)
+    }
     missing = [claim for claim in required if claim not in covered]
     if missing:
         issues.append(f"missing adversarial coverage for claims: {missing}")
 
 
 def _check_freshness(plans: list[dict[str, Any]], latest_seq: int, issues: list[str]) -> None:
-    baselines = [int((p.get("freshness_baseline") or {}).get("latest_receipt_seq") or 0) for p in plans]
+    baselines = latest_receipt_seq_baselines(plans)
     if baselines and max(baselines) < latest_seq:
         issues.append(f"adversarial audit coverage is stale after receipt seq {latest_seq}")
 
 
 def _budget_fields() -> tuple[str, ...]:
-    return (
-        "max_hypotheses",
-        "max_executable_attacks",
-        "max_runtime_seconds",
-        "max_retries_per_attack",
-        "max_output_bytes",
-        "max_generated_artifacts",
-    )
+    return BUDGET_FIELDS
 
 
 def _nonempty_list(value: Any) -> bool:
-    return isinstance(value, list) and any(str(item).strip() for item in value)
+    return nonempty_list(value)
+
+
+def _nonempty_receipts(value: Any) -> bool:
+    return nonempty_string_list(value)
+
+
+def _string_list(value: Any) -> bool:
+    return isinstance(value, list) and all(isinstance(item, str) and item.strip() for item in value)
 
 
 def _uses_project_learning(record: dict[str, Any]) -> bool:
@@ -333,10 +296,4 @@ def _uses_project_learning(record: dict[str, Any]) -> bool:
 
 
 def _has_acceptance(finding: dict[str, Any], records: list[dict[str, Any]]) -> bool:
-    finding_id = finding.get("finding_id")
-    for record in records:
-        if record.get("record_type") != "audit_acceptance":
-            continue
-        if record.get("linked_finding_id") == finding_id and record.get("accepted_scope") and record.get("reason"):
-            return True
-    return False
+    return has_acceptance(finding, records)

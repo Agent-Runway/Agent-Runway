@@ -1,6 +1,6 @@
 # Agent-Runway
 
-[![Version](https://img.shields.io/badge/version-v0.35-blue)](../../issues)
+[![Version](https://img.shields.io/badge/version-v0.36-blue)](../../issues)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.11+-blue)](https://python.org)
 
@@ -32,16 +32,17 @@ AI 가 신뢰를 소모하는 대신 목표를 향해 계속 전진하도록 만
 | 🚪 Completion gate | 모든 기준을 receipts 에 매핑 -> 근거 없는 "done" 방지 |
 | 💰 Budget discipline | slice/retry/time + 소진 시 `wrap_up_guidance` -> 끝없는 retry 극장 방지 |
 | 🛡️ Stale-evidence guard | 파일 수정 후 재검증 필수 -> "edit then read" 로 낡은 evidence 세탁 방지 |
-| 🚫 Assertion blocking | 9개의 regex 패턴으로 "should work" / "probably" / "I believe" 거부 |
+| 🚫 Assertion blocking | 15개의 regex 패턴으로 "should work" / "probably" / "I believe" 거부 |
 | 🔬 Counterexample | `record_counterexample_check` -> 가설 + 반증 점검 + 잔여 위험 |
 | 📝 Decision records | `record_decision_record` -> 선택 + 기각한 대안 + 재오픈 조건 |
 | 🔐 Authorization | 되돌릴 수 없는 작업에는 기록되어 있고 아직 유효한 사용자 승인이 필요 |
 | 🔄 Failure escalation | `record_stuck_attempt` -> materially different 한 전략만 인정, retry budget 소진 후 escalation |
 | 📦 Handoff packet | 어떤 host 에서도 통하는 전체 JSON 패킷 -> 숨은 기억 없는 연속성 |
-| ⛔ Stop enforcement | Claude Code 에서는 Stop hook 기반 물리적 차단, Codex/OpenCode 에서는 advisory |
+| ⛔ Stop enforcement | Claude Code 에서는 Stop hook 기반 물리적 차단, Codex/OpenCode/Pi CLI 에서는 advisory |
 | ⚠️ Dangerous command interception | 10개 분류 + 크로스플랫폼 경로 변형까지 잡는 secret path 차단 |
 | ⚖️ Value Gate | impact 가 높고 검증 가능하며 expansion 이 낮을 때만 계속 진행 |
 | 🧠 Project Learning Ledger | 프로젝트의 pitfalls, runbooks, preferences, invariants 를 담는 검토 가능한 JSONL. advisory 전용이며 evidence 나 authorization 은 아님 |
+| 🧪 Adversarial Audit Gate | 고위험 completion claims 에 대한 bounded falsification. bug 부재의 증명이 아님 |
 
 ## 🎯 해결하는 다섯 가지 문제
 
@@ -94,6 +95,8 @@ mission_lock -> bounded slice -> receipt -> turn_end_gate -> repeat -> completio
 
 OpenCode 는 기본적으로 native MCP configuration 을 사용합니다. 이 저장소에는 `.opencode/plugins/agent-runway.js` 에 실제 bridge 구현이 들어 있지만, OpenCode 는 skill directory 안의 plugin 을 자동으로 찾지 않습니다. 로컬 plugin 을 자동으로 로드하는 위치는 project 의 `.opencode/plugins/`, 사용자 `~/.config/opencode/plugins/`, 그리고 Windows 의 `%USERPROFILE%\.config\opencode\plugins\` 뿐입니다. OpenCode 의 tool events 를 자동으로 receipt ledger 로 보내고 싶다면, 이들 OpenCode plugin 위치 중 하나에 `shim` 또는 `symlink` 를 두어 skill plugin 을 다시 export 하게 만든 다음 `ILH_OPENCODE_BRIDGE=1` 을 설정해야 합니다. 이렇게 하면 receipt capture 는 좋아집니다.
 
+Pi CLI 지원은 의도적으로 더 좁습니다. `python scripts/generate_host_config.py --host pi-cli --project-dir <project-root>` 는 extension-only note 만 출력하며 native MCP configuration 은 생성하지 않습니다. 검증된 interception path 는 `pi.on("tool_call", ...)` 로 `{ block: true, reason: "..." }` 를 반환하는 Pi extension 입니다. `scripts/fixtures/pi_block_extension.js` 를 참고하세요.
+
 ## 🔍 gate 는 어떻게 판단하는가
 
 gate 는 두 층으로 작동합니다. 먼저 evidence 가 해당 claim 을 실제로 뒷받침하는지 확인하고, 그다음 다음 단계가 계속할 가치가 있는지를 판단합니다.
@@ -126,7 +129,7 @@ impact 가 높고, evidence gap 또는 real blocker 가 있으며, verification 
 
 다음과 같은 다섯 가지 작업 유형은 계속하기보다 수습하고 마무리해야 합니다. 문구나 톤의 선호 조정, 이에 상응하는 고위험 문제가 없는 API/runtime/host surface 확장, 안전성·설치성·검증성을 개선하지 않고 presentation 이나 score 만 좋아지는 최적화, gate 와 targeted check 가 이미 통과했고 새로운 재현 가능한 defect 도 없는 상태에서의 추가 local change, 그리고 가치·verification path·stop condition 을 정확히 설명할 수 없는 다음 단계입니다.
 
-Value Gate 는 tool 이 아니라 rule 입니다. v0.35 에서 이렇게 설계한 이유는 runtime 이 이미 budget, receipts, freshness, authorization, criterion mapping 을 관리하고 있기 때문입니다.
+Value Gate 는 tool 이 아니라 rule 입니다. v0.36 에서 이렇게 설계한 이유는 runtime 이 이미 budget, receipts, freshness, authorization, criterion mapping 을 관리하고 있기 때문입니다.
 
 ## 🔧 실패 처리와 escalation
 
@@ -167,6 +170,7 @@ Agent-Runway 설치를 도와줘:
    - Claude Code -> <repo-path>/.claude/settings.json
    - OpenCode -> 실제로 사용하는 OpenCode 설정 파일. 예: ~/.config/opencode/opencode.json, ~/.config/opencode/config.json, %USERPROFILE%\.config\opencode\opencode.json, %USERPROFILE%\.config\opencode\config.json
    - Codex/Cursor -> 해당 host 의 MCP server 설정 내 env 섹션
+   - Pi CLI -> extension-only note. native MCP configuration 은 출력되지 않습니다
 6. host 가 OpenCode 이고 tool-event receipt 를 자동 capture 하고 싶다면, ~/.config/opencode/plugins/agent-runway.js(또는 %USERPROFILE%\.config\opencode\plugins\agent-runway.js)를 만들고 `export { default } from "../skills/agent-runway/.opencode/plugins/agent-runway.js"` 를 넣습니다
 7. skill 이 다른 위치에 설치되어 있다면, 이 재내보내기 경로를 실제 skill path 로 조정합니다. shim 또는 symlink 를 사용하세요. raw plugin file 을 무작정 복사하지 말고, 복사하려면 scripts/opencode_plugin_bridge.py 까지의 상대 경로도 유지해야 합니다
 8. 생성된 OpenCode 설정 또는 host environment 에 ILH_OPENCODE_BRIDGE=1 을 설정한 뒤 OpenCode 를 다시 시작합니다
@@ -204,6 +208,13 @@ python scripts/generate_host_config.py --host opencode --project-dir <project-ro
 python scripts/generate_host_config.py --host <codex|cursor> --project-dir <project-root>
 ```
 
+**Pi CLI:**
+```bash
+python scripts/generate_host_config.py --host pi-cli --project-dir <project-root>
+```
+
+Pi CLI 출력은 extension-only capability note 이며 native MCP installer 가 아닙니다.
+
 #### 2. 설정을 해당 파일에 복사
 
 **Claude Code:** 출력된 JSON 을 프로젝트 루트의 `.claude/settings.json` 에 merge 합니다.
@@ -236,6 +247,12 @@ python -m unittest discover -s mcp/tests -p "test_*.py"
 python scripts/smoke_test.py
 ```
 
+Claude Code, OpenCode, Node, npm 을 사용할 수 있으면 host-level blocking evidence 를 재현할 수 있습니다.
+
+```bash
+python scripts/host_blocking_experiments.py
+```
+
 ### 설정 상세
 
 **runtime 파일 기본 위치:**
@@ -266,7 +283,8 @@ python scripts/smoke_test.py
 │   ├── release_gate.py              # 16-gate harness
 │   ├── release_static_checks.py     # 정적 검사
 │   ├── project_learning_lint.py     # Project Learning Ledger lint
-│   └── project_learning_query.py    # 제한된 advisory ledger query
+│   ├── project_learning_query.py    # 제한된 advisory ledger query
+│   └── host_blocking_experiments.py # 재현 가능한 host blocking 실험
 ├── .opencode/
 │   └── plugins/                     # 선택적 OpenCode bridge
 └── references/                      # architecture, host, budget, receipt, parity, release, project learning
@@ -281,6 +299,7 @@ python scripts/smoke_test.py
 - Host Hooks 가 있으면 위험한 shell command 는 실행 전에 확인을 요구합니다
 - Host Hooks 가 있으면 gate 승인 이후 새로운 receipt 가 하나라도 생기면 그 승인은 오래되어 무효가 되며, `Stop` 에는 새로운 gate decision 이 필요합니다
 - OpenCode `ask` 는 fail-closed 이며, 네이티브 확인 대화상자가 아닙니다
+- Pi CLI 지원은 extension-only 입니다. 검증된 것은 `tool_call` blocking 이며 native MCP 또는 Stop hook parity 가 아닙니다
 - Codex, Cursor 는 이 저장소에서 MCP 경로입니다
 - Project Learning Ledger 는 advisory context 일 뿐입니다. memory 는 evidence 가 아니며 preference 는 authorization 이 아닙니다
 

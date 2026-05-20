@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -17,6 +18,7 @@ if str(MCP_ROOT) not in sys.path:
 from agent_runway_runtime.store import RuntimeStore  # noqa: E402
 from agent_runway_runtime.host_tool_taxonomy import SHELL_LIKE_TOOLS, MUTATION_TOOLS, OBSERVATION_TOOLS  # noqa: E402
 from agent_runway_runtime.host_adapters import resolve_event_host  # noqa: E402
+from agent_runway_runtime.debug_logging import write_debug_log  # noqa: E402
 
 TOOL_NAME_ALIASES = {
     "bash": "Bash",
@@ -48,10 +50,15 @@ NORMALIZED_DANGEROUS_BASH_PATTERNS = [
     " ".join(pattern.split()) for pattern in DANGEROUS_BASH_PATTERNS
 ]
 
-SECRET_PATHS = [
+PROTECTED_PATHS = [
     str(
         Path(
             os.environ.get("ILH_SECRET_PATH", "~/.config/agent-runway/secret.key")
+        ).expanduser()
+    ),
+    str(
+        Path(
+            os.environ.get("ILH_DB_PATH", str(REPO_ROOT / ".agent-runway" / "state.db"))
         ).expanduser()
     ),
 ]
@@ -66,7 +73,7 @@ def decode_event_payload(raw: str, source: str) -> dict[str, Any]:
     if text.startswith("\ufeff"):
         text = text.lstrip("\ufeff")
     try:
-        return json.loads(text)
+        payload = json.loads(text)
     except json.JSONDecodeError as exc:
         preview = text[:200]
         sys.stderr.write(
@@ -82,6 +89,11 @@ def decode_event_payload(raw: str, source: str) -> dict[str, Any]:
             "line": exc.lineno,
             "column": exc.colno,
         }
+    if isinstance(payload, dict):
+        return payload
+    payload_type = type(payload).__name__
+    sys.stderr.write(f"[{source}] stdin JSON payload is not an object; type={payload_type}\n")
+    return {"error": "json_payload_not_object", "payload_type": payload_type}
 
 
 def load_event() -> dict[str, Any]:
@@ -150,13 +162,13 @@ def _secret_path_variants(secret_path: str) -> set[str]:
 def _matches_secret_path(path: str) -> bool:
     normalized = _normalized_path_text(path)
     return any(
-        normalized in _secret_path_variants(secret_path) for secret_path in SECRET_PATHS
+        normalized in _secret_path_variants(secret_path) for secret_path in PROTECTED_PATHS
     )
 
 
 def _bash_reads_secret(command: str) -> bool:
     normalized_command = _security_fold(command)
-    for secret_path in SECRET_PATHS:
+    for secret_path in PROTECTED_PATHS:
         secret_variants = _secret_path_variants(secret_path)
         if any(variant in normalized_command for variant in secret_variants):
             return True
@@ -189,7 +201,7 @@ def shell_command_text(tool_input: dict[str, Any]) -> str:
 
 
 def parse_failure_decision(event: dict[str, Any]) -> dict[str, str] | None:
-    if event.get("error") != "json_decode_failed":
+    if not event_parse_failed(event):
         return None
     return {
         "permissionDecision": "deny",
@@ -198,7 +210,7 @@ def parse_failure_decision(event: dict[str, Any]) -> dict[str, str] | None:
 
 
 def parse_failure_stop_response(event: dict[str, Any]) -> dict[str, Any] | None:
-    if event.get("error") != "json_decode_failed":
+    if not event_parse_failed(event):
         return None
     return {
         "continue": False,
@@ -207,12 +219,51 @@ def parse_failure_stop_response(event: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def event_parse_failed(event: dict[str, Any]) -> bool:
-    return event.get("error") == "json_decode_failed"
+    return event.get("error") in {"json_decode_failed", "json_payload_not_object"}
+
+
+def optional_object_field(event: dict[str, Any], field: str) -> dict[str, Any] | None:
+    value = event.get(field)
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return value
+    return None
+
+
+def malformed_field_reason(field: str) -> str:
+    return f"hook payload rejected because {field} must be an object"
+
+
+def malformed_field_decision(field: str) -> dict[str, str]:
+    return {
+        "permissionDecision": "deny",
+        "permissionDecisionReason": malformed_field_reason(field),
+    }
+
+
+def first_malformed_object_field(event: dict[str, Any], fields: tuple[str, ...]) -> str | None:
+    for field in fields:
+        if optional_object_field(event, field) is None:
+            return field
+    return None
 
 
 def active_task_id(store: RuntimeStore, session_id: str) -> str | None:
     mission = store.get_active_mission(session_id)
     return mission.task_id if mission else None
+
+
+def receipt_scope(store: RuntimeStore, event: dict[str, Any], source: str) -> tuple[str, str | None]:
+    session_id = str(event.get("session_id", "unknown"))
+    mission = store.get_active_mission(session_id)
+    if mission is not None:
+        return mission.session_id, mission.task_id
+    cwd = event.get("cwd") or str(REPO_ROOT)
+    fallback = store.get_latest_active_mission_by_cwd(str(cwd))
+    if fallback is None:
+        return session_id, None
+    return fallback.session_id, fallback.task_id
 
 
 def json_response(payload: dict[str, Any]) -> int:
@@ -222,6 +273,7 @@ def json_response(payload: dict[str, Any]) -> int:
 
 
 def session_start(event: dict[str, Any]) -> int:
+    write_debug_log("session_start", {"session_id": event.get("session_id"), "cwd": event.get("cwd")})
     if event_parse_failed(event):
         return 0
 
@@ -244,7 +296,7 @@ def pre_tool_use_decision(tool_name: str, tool_input: dict[str, Any]) -> dict[st
         if _bash_reads_secret(command):
             return {
                 "permissionDecision": "deny",
-                "permissionDecisionReason": "Harness secret paths are not readable by the agent.",
+                "permissionDecisionReason": "Harness secret/state protected paths are not readable by the agent.",
             }
         lowered = " ".join(command.lower().split())
         if any(pattern in lowered for pattern in NORMALIZED_DANGEROUS_BASH_PATTERNS):
@@ -258,7 +310,7 @@ def pre_tool_use_decision(tool_name: str, tool_input: dict[str, Any]) -> dict[st
         if isinstance(path, str) and _matches_secret_path(path):
             return {
                 "permissionDecision": "deny",
-                "permissionDecisionReason": "Harness secret paths are not readable by the agent.",
+                "permissionDecisionReason": "Harness secret/state protected paths are not readable by the agent.",
             }
     return None
 
@@ -275,15 +327,53 @@ def _extract_exit_code(tool_response: dict[str, Any]) -> int | None:
     return None
 
 
+def _extract_duration_seconds(tool_response: dict[str, Any]) -> int | float | None:
+    for source in (tool_response, tool_response.get("metadata")):
+        if not isinstance(source, dict):
+            continue
+        value = _first_present(
+            source,
+            ("duration_seconds", "durationSeconds", "elapsed_seconds", "elapsedSeconds"),
+        )
+        if _valid_duration_number(value):
+            return value
+        milliseconds = _first_present(source, ("duration_ms", "durationMs", "elapsed_ms", "elapsedMs"))
+        if _valid_duration_number(milliseconds):
+            return milliseconds / 1000
+    return None
+
+
+def _valid_duration_number(value: Any) -> bool:
+    return (
+        not isinstance(value, bool)
+        and isinstance(value, (int, float))
+        and value >= 0
+        and math.isfinite(float(value))
+    )
+
+
+def _first_present(source: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if key in source:
+            return source[key]
+    return None
+
+
 def record_tool_use_event(event: dict[str, Any], source: str) -> dict[str, Any]:
+    malformed = first_malformed_object_field(event, ("tool_input", "tool_response"))
+    if malformed is not None:
+        return {"recorded": False, "reason": malformed_field_reason(malformed)}
+
     store = build_store(event)
-    session_id = event.get("session_id", "unknown")
+    session_id, task_id = receipt_scope(store, event, source)
     tool_name = canonical_tool_name(event.get("tool_name", ""))
-    tool_input = event.get("tool_input", {}) or {}
-    tool_response = event.get("tool_response", {}) or {}
-    task_id = active_task_id(store, session_id)
+    tool_input = optional_object_field(event, "tool_input") or {}
+    tool_response = optional_object_field(event, "tool_response") or {}
 
     metadata: dict[str, Any] = {"hook_event": event.get("hook_event_name")}
+    duration_seconds = _extract_duration_seconds(tool_response)
+    if duration_seconds is not None:
+        metadata["duration_seconds"] = duration_seconds
     command_text: str | None = None
     exit_code: int | None = None
 
@@ -341,6 +431,14 @@ def record_tool_use_event(event: dict[str, Any], source: str) -> dict[str, Any]:
 
 
 def pre_tool_use(event: dict[str, Any]) -> int:
+    write_debug_log(
+        "pre_tool_use",
+        {
+            "session_id": event.get("session_id"),
+            "tool_name": event.get("tool_name"),
+            "tool_input": event.get("tool_input"),
+        },
+    )
     parse_failure = parse_failure_decision(event)
     if parse_failure is not None:
         return json_response(
@@ -348,7 +446,16 @@ def pre_tool_use(event: dict[str, Any]) -> int:
         )
 
     tool_name = canonical_tool_name(event.get("tool_name", ""))
-    tool_input = event.get("tool_input", {}) or {}
+    tool_input = optional_object_field(event, "tool_input")
+    if tool_input is None:
+        return json_response(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    **malformed_field_decision("tool_input"),
+                }
+            }
+        )
 
     decision = pre_tool_use_decision(tool_name, tool_input)
     if decision is not None:
@@ -365,6 +472,14 @@ def pre_tool_use(event: dict[str, Any]) -> int:
 
 
 def post_tool_use(event: dict[str, Any]) -> int:
+    write_debug_log(
+        "post_tool_use",
+        {
+            "session_id": event.get("session_id"),
+            "tool_name": event.get("tool_name"),
+            "tool_input": event.get("tool_input"),
+        },
+    )
     if event_parse_failed(event):
         return 0
 
@@ -373,6 +488,7 @@ def post_tool_use(event: dict[str, Any]) -> int:
 
 
 def stop(event: dict[str, Any]) -> int:
+    write_debug_log("stop", {"session_id": event.get("session_id")})
     parse_failure = parse_failure_stop_response(event)
     if parse_failure is not None:
         return json_response(parse_failure)

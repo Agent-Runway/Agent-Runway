@@ -50,7 +50,10 @@ def audit_plan(seq: int = 3) -> dict[str, object]:
             "max_output_bytes": 10000,
             "max_generated_artifacts": 1,
         },
-        "freshness_baseline": {"latest_receipt_seq": seq},
+        "freshness_baseline": {
+            "latest_receipt_seq": seq,
+            "timestamp": "2026-05-09T00:00:00Z",
+        },
         "created_at": "2026-05-09T00:00:00Z",
         "source_refs": [{"kind": "file", "path": "mcp/server.py", "summary": "target"}],
     }
@@ -72,6 +75,7 @@ def audit_attempt(outcome: str = "attack_failed") -> dict[str, object]:
         "observed_result": "The gate rejected stale evidence.",
         "outcome": outcome,
         "residual_risk": "Only deterministic stale receipt path covered.",
+        "timestamp": "2026-05-09T00:00:01Z",
         "created_at": "2026-05-09T00:00:01Z",
     }
 
@@ -117,6 +121,15 @@ class AdversarialAuditTestCase(unittest.TestCase):
         self.assertIn("audit_plan requires audit_scope.target_claims", issues)
         self.assertIn("audit_plan requires audit_budget", issues)
 
+    def test_plan_requires_parseable_baseline_timestamp(self) -> None:
+        audit = importlib.import_module("agent_runway_runtime.adversarial_audit")
+        broken = audit_plan()
+        broken["freshness_baseline"] = {"latest_receipt_seq": 3}
+
+        issues = "\n".join(audit.lint_records([broken]))
+
+        self.assertIn("audit_plan requires parseable freshness_baseline.timestamp", issues)
+
     def test_no_receipt_or_low_severity_finding_cannot_block(self) -> None:
         audit = importlib.import_module("agent_runway_runtime.adversarial_audit")
         no_receipt_attempt = audit_attempt("attack_succeeded")
@@ -125,6 +138,15 @@ class AdversarialAuditTestCase(unittest.TestCase):
         issues = "\n".join(audit.lint_records(records))
         self.assertIn("blocking finding requires critical/high severity", issues)
         self.assertIn("blocking finding requires executable evidence", issues)
+
+    def test_executable_attempt_requires_parseable_timestamp(self) -> None:
+        audit = importlib.import_module("agent_runway_runtime.adversarial_audit")
+        untimed_attempt = audit_attempt("attack_failed")
+        untimed_attempt["timestamp"] = "not-a-time"
+
+        issues = "\n".join(audit.lint_records([audit_plan(), untimed_attempt]))
+
+        self.assertIn("audit_attempt with attack outcome requires parseable timestamp", issues)
 
     def test_banned_proof_of_safety_phrase_fails_lint(self) -> None:
         audit = importlib.import_module("agent_runway_runtime.adversarial_audit")
@@ -135,13 +157,80 @@ class AdversarialAuditTestCase(unittest.TestCase):
     def test_nonblocking_dispositions_do_not_block_gate(self) -> None:
         audit = importlib.import_module("agent_runway_runtime.adversarial_audit")
         for disposition in ["needs_reproduction", "false_positive", "non_blocking"]:
-            records = [audit_plan(), audit_attempt("needs_reproduction"), finding(disposition)]
+            records = [audit_plan(), audit_attempt("attack_failed"), finding(disposition)]
             self.assertEqual([], audit.gate_violations(records, ["runtime_gate_adversary"], [], 3))
 
     def test_stale_audit_fails_gate_after_target_mutation(self) -> None:
         audit = importlib.import_module("agent_runway_runtime.adversarial_audit")
         issues = audit.gate_violations(valid_records(), ["runtime_gate_adversary"], [], 4)
         self.assertTrue(any("stale" in issue for issue in issues))
+
+    def test_required_profile_is_not_satisfied_by_unexecuted_attempt(self) -> None:
+        audit = importlib.import_module("agent_runway_runtime.adversarial_audit")
+        seeded_attempt = audit_attempt()
+        seeded_attempt["execution_receipts"] = []
+        seeded_attempt.pop("outcome")
+
+        issues = audit.gate_violations(
+            [audit_plan(), seeded_attempt, finding("non_blocking")],
+            ["runtime_gate_adversary"],
+            [],
+            3,
+        )
+
+        self.assertTrue(any("missing required adversarial profiles" in issue for issue in issues))
+
+    def test_required_profile_is_not_satisfied_by_needs_reproduction_attempt(self) -> None:
+        audit = importlib.import_module("agent_runway_runtime.adversarial_audit")
+        unproven_attempt = audit_attempt("needs_reproduction")
+
+        issues = audit.gate_violations(
+            [audit_plan(), unproven_attempt, finding("non_blocking")],
+            ["runtime_gate_adversary"],
+            [],
+            3,
+        )
+
+        self.assertTrue(any("missing required adversarial profiles" in issue for issue in issues))
+
+    def test_required_claim_is_not_satisfied_by_plan_without_executed_attempt(self) -> None:
+        audit = importlib.import_module("agent_runway_runtime.adversarial_audit")
+
+        issues = audit.gate_violations([audit_plan()], [], ["completion gate rejects stale receipts"], 3)
+
+        self.assertTrue(any("missing adversarial coverage for claims" in issue for issue in issues))
+
+    def test_required_claim_is_not_satisfied_by_untimed_attempt(self) -> None:
+        audit = importlib.import_module("agent_runway_runtime.adversarial_audit")
+        untimed_attempt = audit_attempt("attack_failed")
+        untimed_attempt["timestamp"] = "not-a-time"
+
+        issues = audit.gate_violations(
+            [audit_plan(), untimed_attempt, finding("non_blocking")],
+            [],
+            ["completion gate rejects stale receipts"],
+            3,
+        )
+
+        self.assertTrue(any("missing adversarial coverage for claims" in issue for issue in issues))
+
+    def test_required_coverage_ignores_attempt_before_baseline_timestamp(self) -> None:
+        audit = importlib.import_module("agent_runway_runtime.adversarial_audit")
+        plan = audit_plan()
+        plan["freshness_baseline"] = {
+            "latest_receipt_seq": 3,
+            "timestamp": "2026-05-09T00:00:05Z",
+        }
+
+        issues = audit.gate_violations(
+            [plan, audit_attempt("attack_failed"), finding("non_blocking")],
+            ["runtime_gate_adversary"],
+            ["completion gate rejects stale receipts"],
+            3,
+        )
+
+        self.assertTrue(any("missing required adversarial profiles" in issue for issue in issues))
+        self.assertTrue(any("missing adversarial coverage for claims" in issue for issue in issues))
 
     def test_project_learning_can_seed_but_not_satisfy_evidence(self) -> None:
         audit = importlib.import_module("agent_runway_runtime.adversarial_audit")

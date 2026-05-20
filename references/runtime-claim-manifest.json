@@ -61,6 +61,8 @@
       "required_files": [
         "mcp/server.py",
         "mcp/agent_runway_runtime/store.py",
+        "mcp/tests/test_receipt_scope_edges.py",
+        "mcp/tests/test_receipt_scope_validation_edges.py",
         "references/receipt-quality.md",
         "scripts/benchmark_suite.py"
       ],
@@ -98,7 +100,9 @@
         "mcp/server.py",
         "references/budget-discipline.md",
         "scripts/benchmark_suite.py",
-        "mcp/tests/test_runtime.py"
+        "mcp/tests/test_runtime.py",
+        "mcp/tests/test_receipt_scope_edges.py",
+        "mcp/tests/test_receipt_scope_validation_edges.py"
       ],
       "required_tools": [
         "turn_end_gate"
@@ -191,7 +195,10 @@
       "enforcement": "hook+tests",
       "required_files": [
         "scripts/claude_hooks.py",
+        "mcp/agent_runway_runtime/debug_logging.py",
         "mcp/tests/test_hooks.py",
+        "mcp/tests/test_hook_payload_edges.py",
+        "mcp/tests/test_debug_logging.py",
         "references/runtime-capability-matrix.md"
       ],
       "required_tools": [],
@@ -200,7 +207,7 @@
         "pre_tool_use",
         "stop"
       ],
-      "min_mode": "hosted"
+      "min_mode": "hosted-hook"
     },
     {
       "id": "release-discipline",
@@ -242,8 +249,14 @@
         ".opencode/plugins/agent-runway.js",
         "scripts/opencode_plugin_bridge.py",
         "mcp/tests/test_opencode_plugin.py",
+        "mcp/tests/test_opencode_bridge_jsonc_parser.py",
+        "mcp/tests/test_opencode_bridge_payload_edges.py",
+        "mcp/tests/test_opencode_plugin_jsonc_edges.py",
+        "mcp/tests/test_opencode_plugin_duration_edges.py",
         "mcp/tests/test_release_gate.py",
-        "mcp/tests/test_hooks.py"
+        "mcp/tests/test_hooks.py",
+        "mcp/tests/test_hook_payload_edges.py",
+        "mcp/tests/test_debug_logging.py"
       ],
       "required_tools": [],
       "required_scripts": [
@@ -252,7 +265,7 @@
       "required_hooks": [
         "pre_tool_use"
       ],
-      "min_mode": "hosted"
+      "min_mode": "host-assisted"
     },
     {
       "id": "host-blocking-experiments",
@@ -263,8 +276,10 @@
         "scripts/fixtures/pi_block_extension.js",
         "scripts/fixtures/opencode_block_experiment.mjs",
         "mcp/agent_runway_runtime/host_adapters.py",
+        "mcp/agent_runway_runtime/debug_logging.py",
         "mcp/tests/test_host_adapters.py",
         "mcp/tests/test_generate_host_config.py",
+        "mcp/tests/test_debug_logging.py",
         "references/runtime-capability-matrix.md",
         "references/host-integration.md"
       ],
@@ -330,7 +345,13 @@
         "scripts/adversarial_audit_lint.py",
         "scripts/adversarial_audit_suite.py",
         "mcp/agent_runway_runtime/adversarial_audit.py",
-        "mcp/tests/test_adversarial_audit.py"
+        "mcp/agent_runway_runtime/adversarial_audit_plan_edges.py",
+        "mcp/agent_runway_runtime/adversarial_audit_reading.py",
+        "mcp/tests/test_adversarial_audit.py",
+        "mcp/tests/test_adversarial_audit_plan_edges.py",
+        "mcp/tests/test_adversarial_audit_direct_helper_edges.py",
+        "mcp/tests/test_adversarial_audit_read_errors.py",
+        "mcp/tests/test_adversarial_audit_type_edges.py"
       ],
       "required_tools": [
         "mission_lock",
