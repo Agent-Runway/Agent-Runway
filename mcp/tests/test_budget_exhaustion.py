@@ -85,6 +85,15 @@ class BudgetExhaustionTestCase(unittest.TestCase):
             ["inspect frontier"],
             time_budget_minutes=1,
         )
+        first = self.make_bash_receipt("s1", "time-wrap-task", "python one.py")
+        first_result = self.server.turn_end_gate(
+            session_id="s1",
+            task_id="time-wrap-task",
+            stop_condition="slice_verified",
+            work_summary="Verified an initial slice with direct command output evidence.",
+            receipt_ids=[first.receipt_id],
+        )
+        self.assertIn("APPROVED", first_result)
         with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute(
                 "UPDATE missions SET created_at=? WHERE session_id=? AND task_id=?",
@@ -101,6 +110,21 @@ class BudgetExhaustionTestCase(unittest.TestCase):
         )
         self.assertIn("APPROVED", wrap_result)
         self.assertIn("stop_condition: frontier_exhausted", wrap_result)
+
+    def test_frontier_exhausted_rejects_first_turn_without_verified_slice(self) -> None:
+        self.server.mission_lock("s1", "first-turn-frontier", "goal", ["criterion"])
+        receipt = self.make_bash_receipt("s1", "first-turn-frontier", "python inspect.py")
+
+        rejected = self.server.turn_end_gate(
+            session_id="s1",
+            task_id="first-turn-frontier",
+            stop_condition="frontier_exhausted",
+            work_summary="Inspected the local frontier before doing any verified work and found no action.",
+            receipt_ids=[receipt.receipt_id],
+        )
+
+        self.assertIn("REJECTED", rejected)
+        self.assertIn("previously verified slice", rejected)
 
     def test_slice_verified_is_rejected_after_slice_budget_is_exhausted(self) -> None:
         self.server.mission_lock(
@@ -159,7 +183,7 @@ class BudgetExhaustionTestCase(unittest.TestCase):
         self.assertIn("REJECTED", rejected)
         self.assertIn("time budget is exhausted", rejected)
 
-    def test_api_timeout_wall_clock_does_not_exhaust_active_work_time_budget(self) -> None:
+    def test_uninstrumented_api_timeout_wall_clock_exhausts_time_budget(self) -> None:
         self.server.mission_lock(
             "s1",
             "api-timeout-task",
@@ -174,19 +198,20 @@ class BudgetExhaustionTestCase(unittest.TestCase):
             )
 
         receipt = self.make_bash_receipt("s1", "api-timeout-task", "python verify.py")
-        approved = self.server.turn_end_gate(
+        rejected = self.server.turn_end_gate(
             session_id="s1",
             task_id="api-timeout-task",
             stop_condition="slice_verified",
-            work_summary="Verified the slice after an external API timeout delay that should not consume active work budget.",
+            work_summary="Attempted to claim a verified slice after an uninstrumented external API timeout delay.",
             receipt_ids=[receipt.receipt_id],
         )
-        self.assertIn("APPROVED", approved)
+        self.assertIn("REJECTED", rejected)
+        self.assertIn("time budget is exhausted", rejected)
 
         status = json.loads(self.server.budget_status("s1", "api-timeout-task"))
         self.assertGreater(status["wall_clock_elapsed_minutes"], status["elapsed_minutes"])
-        self.assertGreater(status["time_remaining_minutes"], 0)
-        self.assertFalse(status["time_budget_exhausted"])
+        self.assertEqual(status["time_remaining_minutes"], 0)
+        self.assertTrue(status["time_budget_exhausted"])
 
     def test_single_long_running_receipt_exhausts_active_work_time_budget(self) -> None:
         self.server.mission_lock(

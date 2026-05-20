@@ -51,14 +51,14 @@ class DebugLoggingTests(unittest.TestCase):
         script = REPO_ROOT / "scripts" / "generate_host_config.py"
 
         claude = subprocess.run(
-            [sys.executable, str(script), "--host", "claude-code", "--project-dir", str(self.project_dir), "--debug"],
+            [sys.executable, str(script), "--host", "claude-code", "--agent-runway-dir", str(self.project_dir), "--debug"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
             check=False,
         )
         opencode = subprocess.run(
-            [sys.executable, str(script), "--host", "opencode", "--project-dir", str(self.project_dir), "--debug"],
+            [sys.executable, str(script), "--host", "opencode", "--agent-runway-dir", str(self.project_dir), "--debug"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -69,18 +69,19 @@ class DebugLoggingTests(unittest.TestCase):
         self.assertEqual(0, opencode.returncode, opencode.stdout)
         claude_payload = json.loads(claude.stdout)
         opencode_payload = json.loads(opencode.stdout)
-        expected_log = str(self.project_dir / ".agent-runway" / "debug.log")
         self.assertEqual("1", claude_payload["env"]["ILH_DEBUG"])
-        self.assertEqual(expected_log, claude_payload["env"]["ILH_DEBUG_LOG_PATH"])
+        self.assertNotIn("ILH_DEBUG_LOG_PATH", claude_payload["env"])
+        self.assertNotIn("ILH_DB_PATH", claude_payload["env"])
         environment = opencode_payload["mcp"]["agent-runway"]["environment"]
         self.assertEqual("1", environment["ILH_DEBUG"])
-        self.assertEqual(expected_log, environment["ILH_DEBUG_LOG_PATH"])
+        self.assertNotIn("ILH_DEBUG_LOG_PATH", environment)
+        self.assertNotIn("ILH_DB_PATH", environment)
 
     def test_generate_host_config_debug_emits_generic_mcp_env(self) -> None:
         script = REPO_ROOT / "scripts" / "generate_host_config.py"
 
         proc = subprocess.run(
-            [sys.executable, str(script), "--host", "codex", "--project-dir", str(self.project_dir), "--debug"],
+            [sys.executable, str(script), "--host", "codex", "--agent-runway-dir", str(self.project_dir), "--debug"],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -89,14 +90,14 @@ class DebugLoggingTests(unittest.TestCase):
 
         self.assertEqual(0, proc.returncode, proc.stdout)
         payload = json.loads(proc.stdout)
-        expected_log = str(self.project_dir / ".agent-runway" / "debug.log")
         self.assertEqual("1", payload["env"]["ILH_DEBUG"])
-        self.assertEqual(expected_log, payload["env"]["ILH_DEBUG_LOG_PATH"])
+        self.assertNotIn("ILH_DEBUG_LOG_PATH", payload["env"])
+        self.assertNotIn("ILH_DB_PATH", payload["env"])
 
     def test_generate_host_config_omits_debug_env_by_default(self) -> None:
         script = REPO_ROOT / "scripts" / "generate_host_config.py"
         proc = subprocess.run(
-            [sys.executable, str(script), "--host", "claude-code", "--project-dir", str(self.project_dir)],
+            [sys.executable, str(script), "--host", "claude-code", "--agent-runway-dir", str(self.project_dir)],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
@@ -206,6 +207,26 @@ class DebugLoggingTests(unittest.TestCase):
         self.assertIn("opencode_bridge.pre_tool_use", events)
         self.assertIn("opencode_bridge.post_tool_use", events)
 
+    def test_opencode_bridge_debug_log_handles_surrogate_tool_input(self) -> None:
+        self.enable_debug()
+        bridge = importlib.reload(importlib.import_module("opencode_plugin_bridge"))
+        self.server.mission_lock("s1", "t1", "goal", ["criterion"])
+
+        result = bridge.post_tool_use(
+            {
+                "session_id": "s1",
+                "cwd": str(self.project_dir),
+                "tool_name": "bash",
+                "tool_input": {"command": f"printf {chr(0xDC80)}"},
+                "tool_response": {"output": "ok", "metadata": {"exitCode": 0}},
+            }
+        )
+
+        self.assertTrue(result["recorded"])
+        entries = self.read_entries()
+        self.assertEqual("opencode_bridge.post_tool_use", entries[-1]["event"])
+        self.assertIn("\\udc80", self.log_path.read_text(encoding="utf-8"))
+
     def test_hook_debug_is_disabled_by_default(self) -> None:
         output = io.StringIO()
 
@@ -237,6 +258,14 @@ class DebugLoggingTests(unittest.TestCase):
         self.assertEqual("s1", details["session_id"])
         self.assertEqual("t1", details["task_id"])
         self.assertEqual(["missing-receipt"], details["receipt_ids"])
+        errors = [
+            entry
+            for entry in entries
+            if entry["event"] == "runtime_tool.error"
+            and entry["details"]["tool_name"] == "turn_end_gate"
+        ]
+        self.assertEqual(1, len(errors))
+        self.assertEqual(["missing-receipt"], errors[0]["details"]["receipt_ids"])
 
     def test_runtime_debug_logs_completion_missing_receipts_context(self) -> None:
         self.enable_debug()
@@ -257,6 +286,110 @@ class DebugLoggingTests(unittest.TestCase):
         self.assertEqual("s1", details["session_id"])
         self.assertEqual("t1", details["task_id"])
         self.assertEqual(["missing-receipt"], details["receipt_ids"])
+        errors = [
+            entry
+            for entry in entries
+            if entry["event"] == "runtime_tool.error"
+            and entry["details"]["tool_name"] == "completion_gate"
+        ]
+        self.assertEqual(1, len(errors))
+        self.assertEqual([["missing-receipt"]], errors[0]["details"]["receipt_ids"])
+
+    def test_runtime_tool_error_debug_logs_counterexample_validation_failure(self) -> None:
+        self.enable_debug()
+        self.server.mission_lock("s1", "t1", "debug counterexample failure", ["tests pass"])
+
+        with self.assertRaisesRegex(ValueError, "receipt_ids must include at least one receipt_id"):
+            self.server.record_counterexample_check(
+                "s1",
+                "t1",
+                "the claim could be false",
+                ["looked for a contrary case"],
+                "no receipt evidence was supplied",
+                [],
+                "unverified without receipts",
+            )
+
+        entries = self.read_entries()
+        matching = [
+            entry
+            for entry in entries
+            if entry["event"] == "runtime_tool.error"
+            and entry["details"]["tool_name"] == "record_counterexample_check"
+        ]
+        self.assertEqual(1, len(matching))
+        details = matching[0]["details"]
+        self.assertEqual("s1", details["session_id"])
+        self.assertEqual("t1", details["task_id"])
+        self.assertEqual([], details["receipt_ids"])
+        self.assertEqual("ValueError", details["exception_type"])
+        self.assertIn("receipt_ids must include at least one receipt_id", details["error_message"])
+        self.assertIn("receipt_ids", details["argument_names"])
+        self.assertNotIn("arguments", details)
+        self.assertTrue(details["traceback"])
+
+    def test_runtime_tool_error_debug_logs_mission_lock_validation_failure(self) -> None:
+        self.enable_debug()
+
+        with self.assertRaisesRegex(ValueError, "goal must not be empty"):
+            self.server.mission_lock("s1", "t1", "", [])
+
+        entries = self.read_entries()
+        matching = [
+            entry
+            for entry in entries
+            if entry["event"] == "runtime_tool.error"
+            and entry["details"]["tool_name"] == "mission_lock"
+        ]
+        self.assertEqual(1, len(matching))
+        details = matching[0]["details"]
+        self.assertEqual("s1", details["session_id"])
+        self.assertEqual("t1", details["task_id"])
+        self.assertIsNone(details["receipt_ids"])
+        self.assertEqual("ValueError", details["exception_type"])
+        self.assertIn("goal must not be empty", details["error_message"])
+
+    def test_runtime_debug_logs_missing_mission_structured_failure(self) -> None:
+        self.enable_debug()
+
+        payload = json.loads(self.server.budget_status("s1", "missing-task"))
+
+        self.assertEqual("No mission found for this session/task.", payload["error"])
+        entries = self.read_entries()
+        matching = [
+            entry
+            for entry in entries
+            if entry["event"] == "runtime_tool.validation_error"
+            and entry["details"]["tool_name"] == "budget_status"
+        ]
+        self.assertEqual(1, len(matching))
+        details = matching[0]["details"]
+        self.assertEqual("s1", details["session_id"])
+        self.assertEqual("missing-task", details["task_id"])
+        self.assertEqual("missing_mission", details["error"])
+
+    def test_runtime_debug_logs_ambiguous_active_mission_status_failure(self) -> None:
+        self.enable_debug()
+        self.server.mission_lock("s1", "task-a", "goal a", ["criterion a"])
+        self.server.mission_lock("s1", "task-b", "goal b", ["criterion b"])
+
+        status = json.loads(self.server.mission_status("s1", ""))
+
+        self.assertEqual("Multiple active missions; specify task_id.", status["error"])
+        self.assertEqual(2, len(status["candidate_missions"]))
+        entries = self.read_entries()
+        matching = [
+            entry
+            for entry in entries
+            if entry["event"] == "runtime_tool.validation_error"
+            and entry["details"]["tool_name"] == "mission_status"
+        ]
+        self.assertEqual(1, len(matching))
+        details = matching[0]["details"]
+        self.assertEqual("s1", details["session_id"])
+        self.assertEqual("", details["task_id"])
+        self.assertEqual("ambiguous_active_missions", details["error"])
+        self.assertEqual({"task-a", "task-b"}, set(details["active_task_ids"]))
 
 
 if __name__ == "__main__":

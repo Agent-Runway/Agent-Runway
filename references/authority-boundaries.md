@@ -39,6 +39,10 @@ Do not silently:
 
 When the user explicitly approves an irreversible or externally visible action, record that approval with `record_user_authorization`.
 
+Use `authorization_kind="scoped_approval"` for ordinary approvals. These are time-bounded and become stale when later receipts make the approval context outdated.
+
+Use `authorization_kind="standing_boundary"` only when the user explicitly says a command or scope does not need to be asked about again, such as "Gitea does not need my authorization, but GitHub does." Record `expires_at: "never"`. Do not ask again for the authorized command or scope. Still ask for other remotes, destructive operations, force pushes, tag deletion, public release surfaces, or anything outside the stated scope.
+
 Use `authorization_status` before the side effect when:
 
 - the task has continued across multiple slices

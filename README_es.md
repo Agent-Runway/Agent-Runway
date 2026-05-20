@@ -1,8 +1,11 @@
-# Agent-Runway
+<h1 align="center">Agent-Runway</h1>
 
-[![Version](https://img.shields.io/badge/version-v0.36-blue)](../../issues)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.11+-blue)](https://python.org)
+<p align="center">
+  <a href="../../issues"><img src="https://img.shields.io/badge/version-v0.37-blue" alt="Version" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License" /></a>
+  <a href="https://python.org"><img src="https://img.shields.io/badge/python-3.11+-blue" alt="Python" /></a>
+  <a href="https://linux.do"><img src="https://img.shields.io/badge/LinuxDo-community-feb106" alt="LinuxDo" /></a>
+</p>
 
 <p align="center">
   <a href="README.md">English</a> |
@@ -19,7 +22,7 @@
 
 Haz que la IA avance hacia objetivos, no que desgaste tu confianza.
 
-`Agent-Runway` está pensado para desarrolladores atrapados escribiendo "continue" una y otra vez mientras las herramientas de programación con IA se quedan a medias. Hay un nombre para ese rol: Continue Engineer. Sustituye el "ya terminé" autoreportado por una misión, un receipt ledger, presupuestos y gates: un mecanismo de auditoría que rechaza abandonar tareas a mitad de camino y fingir trabajo. Se distribuye como un archivo de skill, escala mediante un runtime MCP para seguimiento estructurado del estado y, en Claude Code, puede bloquear físicamente que el agente se detenga sin aprobación.
+`Agent-Runway` está pensado para desarrolladores atrapados escribiendo "continue" una y otra vez mientras las herramientas de programación con IA se quedan a medias. Hay un nombre para ese rol: Continue Engineer. Sustituye el "ya terminé" autoreportado por una misión, un receipt ledger, presupuestos y gates: un mecanismo de auditoría que rechaza abandonar tareas a mitad de camino y fingir trabajo. Se distribuye como un archivo de skill, escala mediante un runtime MCP para seguimiento estructurado del estado y, cuando el hook `Stop` de Claude Code está configurado y activo, puede bloquear físicamente que el agente se detenga sin aprobación.
 
 ## 💪 Qué puede hacer
 
@@ -32,16 +35,16 @@ Lee esta sección primero como un resumen de capacidades; la tabla de cinco prob
 | 🚪 Completion gate | Cada criterio se asigna a receipts -> sin "done" sin sustento |
 | 💰 Budget discipline | Slice/retry/time + `wrap_up_guidance` al agotarse -> sin teatro de reintentos infinitos |
 | 🛡️ Stale-evidence guard | Tras editar archivos, hay que volver a verificar -> evita lavar evidencia vieja con "edité y luego leí" |
-| 🚫 Assertion blocking | 15 patrones regex rechazan "should work" / "probably" / "I believe" |
+| 🚫 Assertion-language gate | Patrones multilingües rechazan lenguaje ambiguo en los resúmenes de `turn_end_gate` / `completion_gate` |
 | 🔬 Counterexample | `record_counterexample_check` -> hipótesis + refutaciones + riesgo remanente |
 | 📝 Decision records | `record_decision_record` -> decisión + alternativas rechazadas + disparadores de reapertura |
-| 🔐 Authorization | Las acciones irreversibles requieren aprobación del usuario registrada y con vigencia |
+| 🔐 Authorization | Las acciones irreversibles requieren aprobación del usuario registrada y con vigencia; los comandos ya autorizados no se vuelven a preguntar |
 | 🔄 Failure escalation | `record_stuck_attempt` -> solo cuentan estrategias materialmente distintas; escalado tras agotar retry budget |
 | 📦 Handoff packet | Paquete JSON completo entre cualquier host -> continuidad sin memoria oculta |
-| ⛔ Stop enforcement | Bloqueo físico de Stop en Claude Code (hook Stop); en Codex/OpenCode/Pi CLI es advisory |
-| ⚠️ Dangerous command interception | 10 categorías + denegación de `secret path` con coincidencia de variantes multiplataforma |
+| ⛔ Stop enforcement | Bloqueo físico solo con el hook `Stop` de Claude Code configurado; MCP/OpenCode/Pi/Codex/Cursor no tienen paridad de Stop hook |
+| ⚠️ Risk-event interception | Los hooks de Claude pueden preguntar/denegar shell commands riesgosos y lecturas de rutas protegidas; el bridge de OpenCode puede fallar cerrado si está habilitado; Pi CLI es extension-only |
 | ⚖️ Value Gate | Solo continuar cuando el impacto es alto, verificable y de baja expansión |
-| 🧠 Project Learning Ledger | JSONL revisable para pitfalls, runbooks, preferencias e invariants del proyecto; solo advisory, nunca evidencia ni autorización |
+| 🧠 Project Learning Ledger | JSONL local del proyecto bajo `.agent-runway` para pitfalls, runbooks, preferencias e invariants; solo advisory, nunca evidencia ni autorización |
 | 🧪 Adversarial Audit Gate | Falsificación acotada para claims de finalización de alto riesgo; nunca prueba ausencia de bugs |
 
 ## 🎯 Los cinco problemas que resuelve
@@ -54,7 +57,7 @@ Los agentes fallan de formas predecibles y concentradas. Estos son los cinco pro
 | Se equivoca con confianza | Dice "fixed" o "should pass" sin pruebas | La finalización requiere un gate con mapeo criterio-a-receipt |
 | Sigue puliendo sin parar | Edita, audita y expande el alcance mucho después de terminar el trabajo real | Value Gate: solo continuar cuando el impacto es alto y hay lagunas de evidencia |
 | Pierde contexto | El estado deriva entre turnos | Los handoff packets transportan misión, evidencia, presupuesto, decisiones y riesgos |
-| Se sale de su autoridad | Despliega, hace push o llamadas externas sin aprobación duradera | Los registros de autorización se revisan por vigencia antes de acciones irreversibles |
+| Se sale de su autoridad | Despliega, hace push o llamadas externas sin aprobación duradera | Los registros de autorización se revisan por vigencia antes de acciones irreversibles; los comandos ya autorizados no se vuelven a preguntar, y lo que quede fuera del alcance autorizado sigue requiriendo aprobación |
 
 El problema de fondo: los agentes son naturalmente buenos haciendo que los resultados suenen correctos, pero nadie los supervisa.
 
@@ -77,6 +80,8 @@ Cada etapa produce un artefacto concreto de runtime:
 
 Esto no es un prompt que "pide evidencia". Es estado estructurado: mission object, receipt ledger, rastreador de presupuestos, approval tokens y authorization records. El agente lo lee y los gates lo hacen cumplir. Cuando una misión se refresca, los receipts antiguos quedan invalidados y no pueden reutilizarse para la nueva decisión de finalización. Los cinco tools de gate (turn gate, completion gate, stuck attempt, decision record y counterexample) aplican esta regla de forma uniforme.
 
+Los registros de governance respaldados por receipts también necesitan receipt_ids reales y capturados. En Codex, Cursor o cualquier ruta MCP solo de instrucciones sin captura automática de tool receipts, una lista vacía `receipt_ids` señala una limitación de capacidad, no un registro válido; expón la evidencia local directa por separado o corrige el host bridge, en vez de inventar IDs.
+
 ## ⚙️ Runtime modes
 
 | Capacidad | 📄 Archivos del skill | 📄 Skill + ⚙️ MCP | 📄 Skill + ⚙️ MCP + 🧩 Host Assist | 📄 Skill + ⚙️ MCP + 🔒 Hooks |
@@ -87,15 +92,15 @@ Esto no es un prompt que "pide evidencia". Es estado estructurado: mission objec
 | **Budget discipline** | Reglas | ✅ | ✅ | ✅ |
 | **Gate decisions** | Advisory | ✅ | ✅ | ✅ |
 | **Authorization records** | ◽ | ✅ | ✅ | ✅ |
-| **Dangerous command interception** | ◽ | ◽ | 🟡 host-specific | ✅ |
+| **Risk-event interception** | ◽ | ◽ | 🟡 host-specific | ✅ |
 | **Stop enforcement** | ◽ | ◽ | ◽ | ✅ |
 | **Hosts compatibles** | Cualquier Host | Codex, Cursor, VSCode | OpenCode, Pi CLI | Claude Code |
 
 Muestra el modo más fuerte actualmente declarado para cada host; `🟡 host-specific` significa que esa intercepción extra depende del host.
 
-OpenCode usa configuración MCP nativa por defecto. Este repositorio incluye la implementación real del bridge en `.opencode/plugins/agent-runway.js`, pero OpenCode no auto-descubre plugins desde directorios de skill. Solo auto-carga plugins locales desde `.opencode/plugins/` del proyecto, `~/.config/opencode/plugins/` del usuario o, en Windows, `%USERPROFILE%\.config\opencode\plugins\`. Si quieres que los tool events de OpenCode se reenvíen automáticamente al receipt ledger, coloca un `shim` o `symlink` en uno de esos directorios de plugins de OpenCode para que re-exporte el plugin del skill y luego establece `ILH_OPENCODE_BRIDGE=1`. Esto mejora la captura de receipts.
+OpenCode usa configuración MCP nativa por defecto. Este repositorio incluye la implementación real del bridge en `.opencode/plugins/agent-runway.js`, pero OpenCode no auto-descubre plugins desde directorios de skill. Solo auto-carga plugins locales desde `.opencode/plugins/` del proyecto, `~/.config/opencode/plugins/` del usuario o, en Windows, `%USERPROFILE%\.config\opencode\plugins\`. Si quieres que los tool events de OpenCode se reenvíen automáticamente al receipt ledger, coloca un `shim` o `symlink` en uno de esos directorios de plugins de OpenCode para que re-exporte el plugin del skill y luego establece `ILH_OPENCODE_BRIDGE=1`. Esto mejora la captura de receipts, incluida la propagación del exit code de shell cuando OpenCode informa `exit`, `exitCode` o `exit_code`, aunque sigue sin paridad con el Stop hook de Claude.
 
-El soporte de Pi CLI es intencionalmente más estrecho. `python scripts/generate_host_config.py --host pi-cli --project-dir <project-root>` emite solo una nota extension-only, no una configuración MCP nativa. La ruta de intercepción verificada usa una extensión de Pi con `pi.on("tool_call", ...)` que devuelve `{ block: true, reason: "..." }`; consulta `scripts/fixtures/pi_block_extension.js`.
+El soporte de Pi CLI es intencionalmente más estrecho. `python scripts/generate_host_config.py --host pi-cli --agent-runway-dir <agent-runway-dir>` emite solo una nota extension-only, no una configuración MCP nativa. La ruta de intercepción verificada usa una extensión de Pi con `pi.on("tool_call", ...)` que devuelve `{ block: true, reason: "..." }`; consulta `scripts/fixtures/pi_block_extension.js`.
 
 ## 🔍 Cómo deciden los gates
 
@@ -107,7 +112,8 @@ Los gates no se limitan a mirar por encima: detectan el discurso vacío en vario
 
 - **Coincidencia semántica.** El completion gate analiza el lenguaje de cada criterio. Si el criterio dice "tests pass" o "build succeeds", exige execution receipts: un receipt de Read no basta. Si menciona "edit" o "patch", exige mutation receipts. El gate rechaza criterios cuya intención no coincide con el tipo de evidencia aportado.
 - **Evidencia posterior a la mutación.** Después de la última edición de archivos, si no existe un verification receipt en o después de ese número de secuencia para un criterio, el completion gate lo rechaza. No se puede afirmar que "tests pass" con receipts anteriores al último cambio.
-- **Rechazo de lenguaje asertivo.** Los resúmenes de trabajo y de finalización que contengan "should work", "probably", "I believe", "seems to", "appears to", "looks correct", "I'm confident" o "it works" disparan rechazo automático del gate. Se exige lenguaje de acciones concretas.
+- **Rechazo de lenguaje asertivo en resúmenes.** `turn_end_gate` revisa `work_summary` y `completion_gate` revisa `completion_summary` con patrones multilingües para frases como "should work", "probably" o "I believe".
+- Un stop tras un slice verificado no debe esconder en supuestos, riesgos o elementos no verificados una siguiente campaña de alto valor, una nueva fuente alpha o un rediseño de plantilla que siga siendo trabajo local pendiente. Nómbralo como trabajo real restante y continúa, o usa un stop suave legal cuando falte autoridad o información.
 - **Control de alineación con el objetivo.** Cada tres slices aprobados se dispara un aviso `goal_alignment_check_due`: ¿sigues avanzando hacia lo que dice la misión?
 - **Avisos de observación solamente.** Si un turno solo aporta receipts de Read/Glob/Grep sin ejecución, el turn gate avisa: leer no es progreso.
 
@@ -159,23 +165,24 @@ Si estás dentro de una herramienta de IA, puedes enviarle esto directamente:
 Ayúdame a instalar Agent-Runway:
 
 1. Requisito previo: Python 3.11+
-2. Clona el repositorio: git clone https://github.com/Agent-Runway/Agent-Runway
+2. Clona Agent-Runway en el directorio de skills que carga este CLI/host: git clone https://github.com/Agent-Runway/Agent-Runway <cli-skills-dir>/agent-runway
 3. Instala dependencias: pip install mcp
-4. Genera la configuración: python scripts/generate_host_config.py --host <host-actual> --project-dir <ruta-del-repo>
+4. Genera la configuración: python scripts/generate_host_config.py --agent-runway-dir <agent-runway-dir>
+   Si mi host no es Claude Code, añade solo --host opencode, --host codex, --host cursor o --host pi-cli.
 5. Fusiona el JSON de salida en el destino de configuración correcto para mi host actual:
-   - Claude Code -> <ruta-del-repo>/.claude/settings.json
+   - Claude Code -> el .claude/settings.json que usa realmente mi workspace de Claude Code o configuración del host
    - OpenCode -> el archivo de configuración de OpenCode que realmente uso, por ejemplo ~/.config/opencode/opencode.json, ~/.config/opencode/config.json, %USERPROFILE%\.config\opencode\opencode.json o %USERPROFILE%\.config\opencode\config.json
    - Codex/Cursor -> la sección env de configuración del servidor MCP de ese host
    - Pi CLI -> nota extension-only; no se emite configuración MCP nativa
 6. Si el host es OpenCode y quiero captura automática de tool-event receipts, crea ~/.config/opencode/plugins/agent-runway.js (o %USERPROFILE%\.config\opencode\plugins\agent-runway.js) con: export { default } from "../skills/agent-runway/.opencode/plugins/agent-runway.js"
 7. Si el skill está instalado en otra ubicación, ajusta esa ruta de re-export al lugar real del skill. Usa un shim o symlink; no copies sin más el raw plugin file a menos que también conserves su ruta relativa hacia scripts/opencode_plugin_bridge.py
 8. Establece ILH_OPENCODE_BRIDGE=1 en la configuración generada de OpenCode o en el entorno del host y reinicia OpenCode
-9. Verifica: python scripts/quick_validate.py <ruta-del-repo>
+9. Verifica: python scripts/quick_validate.py <agent-runway-dir>
 ```
 
 ### Instalación manual
 
-**Requisitos previos:** Python 3.11+, clona desde GitHub: `https://github.com/Agent-Runway/Agent-Runway`
+**Requisitos previos:** Python 3.11+. Clona Agent-Runway en el directorio de skills que carga tu CLI o host de IA: `git clone https://github.com/Agent-Runway/Agent-Runway <cli-skills-dir>/agent-runway`. Ese directorio clonado es `<agent-runway-dir>` y contiene `SKILL.md`, `scripts/` y `mcp/`; no es el directorio del archivo de configuración del host.
 
 ```bash
 pip install mcp
@@ -187,33 +194,19 @@ Instalar significa añadir el JSON de configuración al archivo de configuració
 
 #### 1. Generar la configuración
 
-Ejecuta el comando para generar el JSON de configuración (sustituye `<project-root>` por la ruta real):
+Ejecuta el comando predeterminado desde `<agent-runway-dir>` para generar el JSON de configuración. Sin `--host`, genera configuración para Claude Code.
 
-**Claude Code:**
 ```bash
-python scripts/generate_host_config.py --project-dir <project-root>
+python scripts/generate_host_config.py --agent-runway-dir <agent-runway-dir>
 ```
 
-**OpenCode:**
-```bash
-python scripts/generate_host_config.py --host opencode --project-dir <project-root>
-```
-
-**Codex / Cursor:**
-```bash
-python scripts/generate_host_config.py --host <codex|cursor> --project-dir <project-root>
-```
-
-**Pi CLI:**
-```bash
-python scripts/generate_host_config.py --host pi-cli --project-dir <project-root>
-```
+Para OpenCode, Codex, Cursor o Pi CLI, usa el mismo comando y añade `--host opencode`, `--host codex`, `--host cursor` o `--host pi-cli` antes de `--agent-runway-dir`.
 
 La salida de Pi CLI es una nota de capacidad extension-only, no un instalador MCP nativo.
 
 #### 2. Copiar la configuración al archivo correspondiente
 
-**Claude Code:** copia el JSON de salida y fusiónalo en `.claude/settings.json` en la raíz del proyecto.
+**Claude Code:** copia el JSON de salida y fusiónalo en el `.claude/settings.json` que usa realmente tu workspace de Claude Code o configuración del host.
 
 **OpenCode:** copia el JSON de salida y fusiónalo en tu archivo de configuración de OpenCode, como `~/.config/opencode/opencode.json`, `~/.config/opencode/config.json`, `%USERPROFILE%\.config\opencode\opencode.json`, `%USERPROFILE%\.config\opencode\config.json` u otra ruta de configuración de OpenCode que realmente uses.
 
@@ -238,8 +231,8 @@ Después, establece `ILH_OPENCODE_BRIDGE=1` en tu configuración de OpenCode. El
 #### 3. Verificar la instalación
 
 ```bash
-python scripts/quick_validate.py <project-root>
-python -m unittest discover -s mcp/tests -p "test_*.py"
+python scripts/quick_validate.py <agent-runway-dir>
+python -B -m pytest mcp/tests -q
 python scripts/smoke_test.py
 ```
 
@@ -252,13 +245,13 @@ python scripts/host_blocking_experiments.py
 ### Detalles de configuración
 
 **Ubicaciones predeterminadas de archivos de runtime:**
-- Base de datos: `.agent-runway/state.db` (dentro de la raíz del proyecto)
+- Base de datos: `.agent-runway/state.db` dentro del directorio del proyecto activo; no uses el directorio de instalación de la skill como base de datos predeterminada compartida entre proyectos
 - Secret key: Linux/macOS `~/.config/agent-runway/secret.key`, Windows `%USERPROFILE%\.config\agent-runway\secret.key`
 - Anular con variables de entorno: `ILH_DB_PATH` / `ILH_SECRET_PATH`
 
 **Notas para Windows:**
-- Usa rutas absolutas para `--project-dir`; en PowerShell la forma probada es `"$(Get-Location)"`
-- Mantén `ILH_DB_PATH` dentro de un directorio de proyecto con permiso de escritura; el runtime crea `.agent-runway` automáticamente
+- Usa rutas absolutas para `--agent-runway-dir`; en PowerShell la forma probada es `"$(Get-Location)"` cuando estás dentro del directorio del skill Agent-Runway
+- Deja `ILH_DB_PATH` sin definir para el uso normal local al proyecto. Defínelo solo cuando quieras una ruta de estado específica para ese proyecto; el runtime crea `.agent-runway` automáticamente
 - Si personalizas `ILH_SECRET_PATH`, colócalo fuera del repositorio y evita sincronizarlo. El runtime intenta endurecer los ACL de Windows con `icacls`; si eso falla, emite una advertencia explícita en lugar de fingir que la key ya está protegida
 
 ## 📂 Archivos del proyecto
@@ -271,42 +264,34 @@ python scripts/host_blocking_experiments.py
 │   ├── server.py                    # runtime
 │   ├── agent_runway_runtime/
 │   │   └── store.py                 # state & receipt ledger
-│   └── tests/                       # tests
+│   └── tests/                       # tests de runtime y adaptadores
 ├── scripts/
 │   ├── generate_host_config.py      # configuración de host
 │   ├── quick_validate.py            # comprobación de estructura
-│   ├── package_skill_check.py       # comprobación de empaquetado
-│   ├── release_gate.py              # harness de 16 gates
-│   ├── release_static_checks.py     # comprobaciones estáticas
+│   ├── smoke_test.py                # smoke test de runtime
 │   ├── project_learning_lint.py     # lint del Project Learning Ledger
 │   ├── project_learning_query.py    # consulta advisory acotada del ledger
+│   ├── dynamic_context.py           # JSONL de contexto acotado por misión
+│   ├── adversarial_audit_lint.py    # lint de registros de auditoría
 │   └── host_blocking_experiments.py # experimentos reproducibles de bloqueo de host
 ├── .opencode/
 │   └── plugins/                     # bridge opcional de OpenCode
-└── references/                      # arquitectura, host, budget, receipt, parity, release y project learning
+└── references/                      # arquitectura, host, budget, receipt, parity y project learning
 ```
 
 ## ⚠️ Límites
 
-- Sin hooks -> Stop enforcement sigue siendo advisory
+- Sin un hook `Stop` configurado en Claude Code, Stop enforcement sigue siendo advisory
 - Un receipt prueba que una herramienta se ejecutó, no la corrección semántica del resultado
 - El acceso a secret o DB degrada la confianza en los receipts
-- Con Host Hooks, las lecturas de secret-key se deniegan en distintas variantes de ruta
-- Con Host Hooks, los shell commands peligrosos disparan confirmación antes de ejecutarse
-- Con Host Hooks, cualquier receipt nuevo después de una aprobación de gate deja obsoleta esa aprobación, así que `Stop` exige una decisión de gate nueva
+- Con hooks configurados de Claude Code, las lecturas de secret-key se deniegan en distintas variantes de ruta
+- Con hooks configurados de Claude Code, los shell commands peligrosos disparan confirmación antes de ejecutarse
+- Con hooks configurados de Claude Code, cualquier receipt nuevo después de una aprobación de gate deja obsoleta esa aprobación, así que `Stop` exige una decisión de gate nueva
 - OpenCode `ask` es fail-closed, no un diálogo nativo de confirmación
 - El soporte de Pi CLI es extension-only: se probó bloqueo `tool_call`, no paridad MCP nativa ni hook Stop
-- Codex y Cursor son rutas MCP en este repositorio
-- Project Learning Ledger es solo advisory: memory no es evidence y preference no es authorization
-
-## ✍️ Créditos
-
-- Publisher: babutree
-- Collaborator: Codex
-
-## 🙏 Agradecimientos
-
-Gracias a la comunidad Linux.do, sincera, amable, unida y profesional.<a href="https://linux.do" target="_blank" rel="noopener noreferrer"><img src="https://camo.githubusercontent.com/36a8066e13b53b968451a780de4cd6a432adeb175522afe7a080562e4f4e2534/68747470733a2f2f696d672e736869656c64732e696f2f62616467652f4c696e7578446f2d636f6d6d756e6974792d316636666665622f68747470733a2f2f6c696e75782e646f" alt="LinuxDo" /></a>
+- Codex y Cursor son rutas MCP en este repositorio; este repo no afirma captura automática de receipts de shell/read/edit para ellos sin un host bridge adicional verificado
+- Project Learning Ledger es local al proyecto bajo el `.agent-runway/` ignorado del proyecto activo: memory no es evidence y preference no es authorization
+- Dynamic Context es local al proyecto en `.agent-runway/dynamic-context.jsonl`, está acotado por misión, limita cada registro a 100k bytes y no es evidence ni authorization
 
 ## 📄 Licencia
 

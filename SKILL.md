@@ -30,33 +30,55 @@ Hold these tensions together:
 
 ## Upgrade rationale
 
-The first-generation version solved prompt-only failure modes. The second-generation version added trigger discipline, degradation modes, evidence provenance, benchmark gates, and portability. This fourth-generation version pushes the system further in twelve ways. Current packaged release: **v0.36**.
+The first-generation version solved prompt-only failure modes. The second-generation version added trigger discipline, degradation modes, evidence provenance, benchmark gates, and portability. This fourth-generation version pushes the system further in twelve ways. Current packaged release: **v0.37**.
 
 This version pushes the system further in twelve ways:
 
 1. anti-saturation scoring so a perfect self-score now requires harder evidence
 2. a runtime capability matrix plus machine-readable claim manifest for stronger parity checks
-3. a consistency lint that catches cross-file drift before release
+3. a machine-readable runtime claim manifest for stronger claim-to-runtime honesty
 4. explicit budget observability via `budget_status`
 5. budget enforcement that blocks another verified-slice claim after exhausted slice or time budgets
 6. richer handoff packets with criterion coverage, risks, unverified items, budget snapshot, and latest user authorization state
 7. runtime-backed user authorization recording with freshness-aware status for irreversible or externally visible actions
-8. benchmark expansion for stale approvals, failed receipts, exhausted budgets, and authorization continuity
-9. broader mutation tests that attack parity, consistency, budget, authorization wiring, ledger, and release wiring
-10. a Project Learning Ledger boundary layer with advisory-only JSONL records, strict linting, and explicit routing constraints documented in [references/project-learning-ledger-policy.md](references/project-learning-ledger-policy.md)
-11. stronger release gates and a generation-4 scorecard ledger documenting ten more rounds and 200 more accepted micro-optimizations
-12. an Adversarial Audit Gate documented in [references/adversarial-audit.md](references/adversarial-audit.md), with schema, lint, deterministic suite, and conditional completion-gate integration for high-risk claims
+8. runtime and test coverage for stale approvals, failed receipts, exhausted budgets, and authorization continuity
+9. maintainer-only release checks that attack parity, consistency, budget, authorization wiring, ledger, and release wiring before packaging
+10. a Project Learning Ledger boundary layer with advisory-only project-local JSONL records, strict linting, and explicit routing constraints documented in [references/project-learning-ledger-policy.md](references/project-learning-ledger-policy.md)
+11. an evolution ledger summarizing ten more rounds and 200 more accepted micro-optimizations without shipping detailed self-scorecard tables to installed users
+12. an Adversarial Audit Gate documented in [references/adversarial-audit.md](references/adversarial-audit.md), with schema, lint, and conditional completion-gate integration for high-risk claims
 
 ## Project Learning Ledger
 
 Use [references/project-learning-ledger-policy.md](references/project-learning-ledger-policy.md) when the task would benefit from small, reviewable project memory about pitfalls, runbooks, project-scoped preferences, or invariants.
 
 - treat project learning as advisory context only
+- keep project learning data in the active project's `.agent-runway/project-learning-ledger.jsonl`, not in the Agent-Runway skill release tree
 - memory is not evidence
 - preference is not authorization
-- read at most 3-5 relevant records before the task
+- before every task in an active project, read project-local memory from `.agent-runway/*.jsonl` when those files exist, especially `.agent-runway/project-learning-ledger.jsonl`
+- read at most 3-5 relevant records from each project learning source before the task unless the user explicitly asks for a full audit
+- for non-trivial work in an active project, read relevant records from that project's `.agent-runway/project-learning-ledger.jsonl` before mission design when the file exists
 - when updating project learning, do it through file edits plus lint and review rather than runtime MCP write tools
-- do not expose or imply runtime MCP write tools for project learning in v0.36
+- do not expose or imply runtime MCP write tools for project learning in v0.37
+
+## Task preflight discipline
+
+Before acting, before task execution in an active project, read the local task contract:
+
+- read `API.md`, `SPEC.md`, and task-relevant local instructions when those files exist
+- read project-local `.agent-runway/*.jsonl` memory before mission design; treat missing files as an observed absence, not a reason to invent memory
+- bind non-trivial work to the MCP mission control plane with `mission_lock` before publishing TODOs or progress claims
+- if MCP is unavailable, say the TODO or mission state is advisory only instead of implying runtime tracking
+
+## Dynamic Context Recovery
+
+Use `scripts/dynamic_context.py` when compacting, handoff gaps, host changes, or short continuation prompts suggest conversational context may have been lost.
+
+- first try the active project's canonical `.agent-runway/dynamic-context.jsonl`
+- if the project explicitly has `agent-runway/dynamic-context.jsonl`, inspect it as a compatibility candidate, but keep `.agent-runway/dynamic-context.jsonl` as the canonical path
+- query by recovered or likely `session_id` and `task_id` when available; otherwise read only a bounded recent slice and ask one clarification if state is still insufficient
+- dynamic context is advisory only, mission-scoped, capped by `scripts/dynamic_context.py`, and never completion evidence or authorization
+- do not fabricate mission details from dynamic context; use it to recover candidate state, then verify with runtime state, files, receipts, or user confirmation
 
 ## Adversarial Audit Gate
 
@@ -65,7 +87,7 @@ Use [references/adversarial-audit.md](references/adversarial-audit.md) when high
 - adversarial audit increases confidence within scope and budget; it never proves absence of bugs
 - blocking findings require fresh, reproducible, in-scope evidence
 - Project Learning Ledger may seed audit hypotheses but cannot satisfy audit evidence
-- do not build or imply a generic multi-agent scheduler in v0.36
+- do not build or imply a generic multi-agent scheduler in v0.37
 
 ## Fast start
 
@@ -84,7 +106,7 @@ For work that is larger than a trivial single edit, do this immediately:
 11. call `turn_end_gate` before ending the turn
 12. call `completion_gate` before declaring completion
 13. when conditions are weak, select the appropriate degradation mode before making strong claims
-14. when the skill itself is being changed, run consistency, parity, ledger, audit, benchmark, mutation, and release gates before packaging
+14. when the skill itself is being changed, run the maintainer release checks from `archive/release-tests/` before packaging
 
 If the task is blocked repeatedly, record materially different failed strategies with `record_stuck_attempt` and use `stuck_escalation` only after the retry budget is genuinely consumed.
 
@@ -101,6 +123,8 @@ If hooks are absent, explicitly say stop gating is still advisory even when the 
 
 When the active environment is weaker than the preferred one, read [references/degradation-modes.md](references/degradation-modes.md), consult [references/runtime-claim-manifest.json](references/runtime-claim-manifest.json), and downgrade claims, not standards.
 
+`prompt_intake_gate` can classify short prompts, draft mission intake, and point to active session or workspace missions in MCP mode. It does not force a model to load this skill by itself, and host-level pre-prompt injection exists only when the host exposes a user-message hook.
+
 ## Activation rule
 
 Use this skill when at least one of these is true:
@@ -111,8 +135,12 @@ Use this skill when at least one of these is true:
 - the task risks fake blockage, premature closure, score-gaming, or scope drift
 - the user wants the model to act as the primary executor, not just a commentator
 - the task is important enough that benchmarked, mutation-tested, release-gated improvement matters
+- the user sends a short continuation such as `continue`, `go on`, `继续`, `weiter`, `continuez`, `continúa`, `continua`, `続けて`, or `계속` and there is an active or recoverable mission, unresolved action frontier, dirty worktree, or previous next step
+- the user omits the skill name but asks for multi-step development, debugging, verification, commit, push, release, or other work with evidence or authorization boundaries
 
 Do not over-apply it to tiny, low-risk, single-action tasks where mission overhead would dominate the work.
+
+If a prompt is short, inspect state harder, not less. If no active mission, workspace mission, handoff, dirty worktree, or previous next step is recoverable, ask one clarification instead of fabricating mission details from memory.
 
 If trigger fit is uncertain, read [references/trigger-matrix.md](references/trigger-matrix.md) before invoking the full control plane.
 
@@ -129,6 +157,17 @@ If trigger fit is uncertain, read [references/trigger-matrix.md](references/trig
 - record consequential reversible decisions when ambiguity could later be misremembered
 - run at least one disconfirming check when a result is easy to over-claim
 - keep claims synchronized with what the runtime can actually enforce
+
+## Todo tracking discipline
+
+When maintaining project todo lists, acceptance ledgers, or CSV task trackers:
+
+- Every visible TODO list for non-trivial work must be represented in MCP mission control via `mission_lock`, `mission_status`, `budget_status`, gates, or equivalent runtime receipts before it is treated as supervised state
+- do not delete prior unfinished todo items just to add a new one
+- preserve existing unfinished work unless the user explicitly marks it completed or cancelled
+- append new todo items to the end by default unless the user explicitly requests different ordering
+- never drop unfinished todo items from the tracker when adding new work
+- if ordering changes, reorder items without dropping unfinished items from the tracker
 
 ## Mission design
 
@@ -161,7 +200,7 @@ Follow this exact control loop for non-trivial work:
 10. **record materially different failed strategies** with `record_stuck_attempt`
 11. **call `completion_gate`** before claiming the task is complete
 12. **export a handoff packet** when continuity or escalation matters
-13. **run consistency, parity, ledger, audit, benchmark, mutation, and release gates** before declaring the skill itself improved
+13. **run maintainer release checks from `archive/release-tests/`** before declaring the skill itself improved
 
 Skipping receipts or skipping gates weakens the system.
 
@@ -351,7 +390,7 @@ Read [references/skill-composition.md](references/skill-composition.md) for prec
 
 When editing this skill, do not stop at prose confidence.
 
-Read [references/benchmark-suite.md](references/benchmark-suite.md) for benchmark tasks, [references/evaluation-hardness.md](references/evaluation-hardness.md) for anti-overfit test design, and [references/release-gates.md](references/release-gates.md) for packaging gates. Use the bundled audit, mutation, and benchmark scripts before packaging.
+Read [references/benchmark-suite.md](references/benchmark-suite.md) for benchmark tasks and [references/evaluation-hardness.md](references/evaluation-hardness.md) for anti-overfit test design. Maintainer release checks live outside the installed skill payload under `archive/release-tests/`.
 
 ## Host portability
 
@@ -405,11 +444,5 @@ Load these references only when relevant:
 - [references/examples.md](references/examples.md) for worked examples
 - [references/benchmark-suite.md](references/benchmark-suite.md) for benchmark tasks and pass criteria
 - [references/evaluation-hardness.md](references/evaluation-hardness.md) for mutation pressure and anti-overfit test design
-- [references/release-gates.md](references/release-gates.md) for release checks and regression gates
 - [references/adapter-contract.md](references/adapter-contract.md) for portable host integration expectations
-- [references/quickstart.md](references/quickstart.md) for local setup and smoke testing
 - [references/scoring-rubric.md](references/scoring-rubric.md) for self-audit and iteration
-- [references/evolution-ledger.md](references/evolution-ledger.md) for generation summaries and accepted rounds
-- [references/generation-3-scorecards.md](references/generation-3-scorecards.md) for the detailed third-generation score evidence
-- [references/generation-4-scorecards.md](references/generation-4-scorecards.md) for the detailed fourth-generation score evidence
-- [references/current-release.md](references/current-release.md) for the packaged version and current high-priority upgrade focus

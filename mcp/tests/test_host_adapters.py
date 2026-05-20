@@ -109,7 +109,9 @@ class HostAdapterTestCase(unittest.TestCase):
         self.assertIn("PowerShell", claude.execution_tools)
         self.assertIn("Shell", claude.execution_tools)
         self.assertIn("Codex", codex.execution_tools)
-        self.assertIn("OpenCode", self.host_adapters.get_host_adapter("opencode").execution_tools)
+        opencode = self.host_adapters.get_host_adapter("opencode")
+        self.assertIn("OpenCode", opencode.execution_tools)
+        self.assertIn("Bash", opencode.execution_tools)
         self.assertIn("bash", self.host_adapters.get_host_adapter("pi-cli").execution_tools)
         self.assertEqual(unknown.execution_tools, frozenset())
         self.assertIn("Read", claude.observation_tools)
@@ -126,6 +128,7 @@ class HostAdapterTestCase(unittest.TestCase):
         self.assertIn("Bash", expected)
         self.assertIn("Codex", expected)
         self.assertIn("OpenCode", expected)
+        self.assertIn("PowerShell", expected)
         self.assertNotIn("Read", expected)
         self.assertNotIn("Edit", expected)
 

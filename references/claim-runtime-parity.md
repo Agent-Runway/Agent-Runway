@@ -18,7 +18,7 @@ Use both of these artifacts together:
 - [runtime-capability-matrix.md](runtime-capability-matrix.md) for human-readable guarantee strength by mode
 - [runtime-claim-manifest.json](runtime-claim-manifest.json) for machine-checkable mapping from claims to files, tools, scripts, or hooks
 
-Run `python scripts/claim_parity_audit.py /path/to/agent-runway` whenever parity claims change.
+For installed-skill use, inspect `runtime-capability-matrix.md` and `runtime-claim-manifest.json` before making guarantee claims. Maintainer parity checks live under `archive/release-tests/` and are not part of the installed skill payload.
 
 ## Parity checks
 

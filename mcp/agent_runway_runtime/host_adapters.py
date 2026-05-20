@@ -47,9 +47,9 @@ HOST_ADAPTERS: dict[str, HostAdapter] = {
         native_mcp_config_supported=True,
         stop_blocking_supported=False,
         config_mode="host_native_config",
-        execution_tools=frozenset({"OpenCode"}),
+        execution_tools=frozenset({"OpenCode", "Bash", "PowerShell", "Shell"}),
         observation_tools=frozenset({"Read", "Glob", "Grep"}),
-        mutation_tools=frozenset({"Edit", "Write", "MultiEdit"}),
+        mutation_tools=frozenset({"Edit", "Write", "MultiEdit", "apply_patch"}),
     ),
     "pi-cli": HostAdapter(
         key="pi-cli",

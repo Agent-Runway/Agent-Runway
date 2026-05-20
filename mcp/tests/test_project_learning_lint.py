@@ -6,11 +6,22 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LINT = REPO_ROOT / "scripts" / "project_learning_lint.py"
-LEDGER = REPO_ROOT / "references" / "project-learning-ledger.jsonl"
+
+
+def load_lint_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("project_learning_lint", LINT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def lint_record(record: dict[str, object]) -> tuple[int, dict[str, object]]:
@@ -83,15 +94,55 @@ def active_preference(**overrides: object) -> dict[str, object]:
 
 
 class ProjectLearningLintDeliverableTestCase(unittest.TestCase):
-    def test_canonical_ledger_passes_strict_lint(self) -> None:
-        proc = subprocess.run(
-            [sys.executable, str(LINT), str(LEDGER), "--strict"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=False,
-        )
+    def test_lint_defaults_to_project_local_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            workspace = Path(td)
+            local_ledger = workspace / ".agent-runway" / "project-learning-ledger.jsonl"
+            shared_ledger = workspace / "references" / "project-learning-ledger.jsonl"
+            local_ledger.parent.mkdir(parents=True)
+            shared_ledger.parent.mkdir(parents=True)
+            local_ledger.write_text(json.dumps(active_pitfall()), encoding="utf-8")
+            shared_ledger.write_text('{"bad"', encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(LINT), "--json"],
+                cwd=workspace,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+
         self.assertEqual(proc.returncode, 0, proc.stdout)
+        payload = json.loads(proc.stdout)
+        self.assertEqual(payload["record_count"], 1)
+        self.assertTrue(payload["path"].endswith(".agent-runway\\project-learning-ledger.jsonl") or payload["path"].endswith(".agent-runway/project-learning-ledger.jsonl"))
+
+    def test_allow_missing_default_ledger_is_explicit(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            proc = subprocess.run(
+                [sys.executable, str(LINT), "--strict", "--allow-missing", "--json"],
+                cwd=Path(td),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(proc.returncode, 0, proc.stdout)
+        payload = json.loads(proc.stdout)
+        self.assertTrue(payload["skipped"])
+        self.assertIn("file does not exist", payload["warnings"][0]["issue"])
+
+    def test_parse_jsonl_streams_without_reading_entire_file(self) -> None:
+        module = load_lint_module()
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "ledger.jsonl"
+            path.write_text(json.dumps(active_pitfall()), encoding="utf-8")
+
+            with patch.object(Path, "read_text", side_effect=AssertionError("ledger must stream")):
+                records, errors = module.parse_jsonl(path)
+
+        self.assertEqual([], errors)
+        self.assertEqual(1, len(records))
 
     def test_confirmed_status_is_not_part_of_v035_state_machine(self) -> None:
         code, payload = lint_record(active_preference(status="confirmed"))

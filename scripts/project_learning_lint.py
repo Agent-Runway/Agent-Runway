@@ -53,6 +53,7 @@ SECRET_PATTERNS = [
     ]
 ]
 TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
+DEFAULT_PROJECT_LEDGER_PATH = Path(".agent-runway") / "project-learning-ledger.jsonl"
 
 
 @dataclass(frozen=True)
@@ -193,22 +194,23 @@ def scan_secrets(record: dict[str, Any], line: int, errors: list[Finding]) -> No
 def parse_jsonl(path: Path) -> tuple[list[tuple[int, dict[str, Any]]], list[Finding]]:
     records: list[tuple[int, dict[str, Any]]] = []
     errors: list[Finding] = []
-    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), start=1):
-        line = raw_line.strip()
-        if not line:
-            continue
-        if line.startswith("#") or line.startswith("//"):
-            errors.append(Finding(line_number, "<none>", "comments are not valid JSONL records"))
-            continue
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError as exc:
-            errors.append(Finding(line_number, "<none>", f"malformed JSON: {exc.msg}"))
-            continue
-        if not isinstance(payload, dict):
-            errors.append(Finding(line_number, "<none>", "record must be a JSON object"))
-            continue
-        records.append((line_number, payload))
+    with path.open("r", encoding="utf-8-sig") as handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            line = raw_line.strip()
+            if not line:
+                continue
+            if line.startswith("#") or line.startswith("//"):
+                errors.append(Finding(line_number, "<none>", "comments are not valid JSONL records"))
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError as exc:
+                errors.append(Finding(line_number, "<none>", f"malformed JSON: {exc.msg}"))
+                continue
+            if not isinstance(payload, dict):
+                errors.append(Finding(line_number, "<none>", "record must be a JSON object"))
+                continue
+            records.append((line_number, payload))
     return records, errors
 
 
@@ -263,19 +265,21 @@ def build_payload(path: Path, records: list[tuple[int, dict[str, Any]]], errors:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Lint Agent-Runway Project Learning Ledger JSONL")
-    parser.add_argument("path", type=Path)
+    parser.add_argument("path", nargs="?", type=Path, default=DEFAULT_PROJECT_LEDGER_PATH)
     parser.add_argument("--json", action="store_true", dest="as_json")
     parser.add_argument("--strict", action="store_true")
+    parser.add_argument("--allow-missing", action="store_true")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     if not args.path.exists():
-        payload = {"path": str(args.path), "record_count": 0, "errors": [{"line": 0, "id": "<none>", "issue": "file does not exist"}], "warnings": [], "passed": False}
+        issue = {"line": 0, "id": "<none>", "issue": "file does not exist; no project-local ledger to lint"}
+        payload = {"path": str(args.path), "record_count": 0, "errors": [], "warnings": [issue], "passed": True, "skipped": True} if args.allow_missing else {"path": str(args.path), "record_count": 0, "errors": [issue], "warnings": [], "passed": False}
     else:
         payload = lint(args.path, strict=args.strict)
-    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    print(json.dumps(payload, indent=2))
     return 0 if payload["passed"] else 2
 
 

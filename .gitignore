@@ -1,0 +1,11 @@
+AGENTS.md
+SPEC.md
+.agent-runway/
+archive/
+*.log
+*.tmp
+*.temp
+*.bak
+*.zip
+__pycache__/
+.pytest_cache/

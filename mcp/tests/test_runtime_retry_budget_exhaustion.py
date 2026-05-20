@@ -93,6 +93,43 @@ class RuntimeRetryBudgetExhaustionTestCase(unittest.TestCase):
         self.assertIn("APPROVED", result)
         self.assertIn("stop_condition: slice_verified", result)
 
+    def test_record_stuck_attempt_rejects_new_strategy_after_retry_budget(self) -> None:
+        self.server.mission_lock(
+            "s1", "retry-cap-task", "debug bounded failure", ["tests pass"], retry_budget=2
+        )
+        first = self.make_bash_receipt("s1", "retry-cap-task", "pytest first.py", exit_code=1)
+        second = self.make_bash_receipt("s1", "retry-cap-task", "pytest second.py", exit_code=1)
+        third = self.make_bash_receipt("s1", "retry-cap-task", "pytest third.py", exit_code=1)
+        self.server.record_stuck_attempt(
+            "s1",
+            "retry-cap-task",
+            "first-strategy",
+            "first concrete strategy reproduced the failure",
+            [first.receipt_id],
+        )
+        self.server.record_stuck_attempt(
+            "s1",
+            "retry-cap-task",
+            "second-strategy",
+            "second concrete strategy reproduced the failure",
+            [second.receipt_id],
+        )
+
+        with self.assertRaisesRegex(ValueError, "retry_budget"):
+            self.server.record_stuck_attempt(
+                "s1",
+                "retry-cap-task",
+                "third-strategy",
+                "third concrete strategy should not be accepted after the budget",
+                [third.receipt_id],
+            )
+
+        attempts = self.store.list_stuck_attempts("s1", "retry-cap-task")
+        self.assertEqual(
+            {"first-strategy", "second-strategy"},
+            {attempt.strategy_fingerprint for attempt in attempts},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

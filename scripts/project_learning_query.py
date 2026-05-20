@@ -3,22 +3,24 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from project_learning_lint import parse_jsonl, parse_time, scoped
+from project_learning_lint import DEFAULT_PROJECT_LEDGER_PATH, parse_jsonl, parse_time, scoped
 
 DEFAULT_LIMIT = 5
 MAX_LIMIT = 5
 ACTIVE_STATUSES = {"active", "mitigated"}
 TYPE_ORDER = {"invariant": 0, "pitfall": 1, "runbook": 2, "preference": 3}
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+TASK_SEPARATOR_TRANSLATION = str.maketrans({"-": " ", "_": " "})
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Query Agent-Runway Project Learning Ledger")
-    parser.add_argument("path", type=Path)
+    parser.add_argument("path", nargs="?", type=Path, default=DEFAULT_PROJECT_LEDGER_PATH)
     parser.add_argument("--host")
     parser.add_argument("--path", dest="file_path")
     parser.add_argument("--task")
@@ -41,6 +43,10 @@ def values(record: dict[str, Any], key: str) -> list[str]:
     return []
 
 
+def normalized_task(value: str) -> str:
+    return " ".join(value.translate(TASK_SEPARATOR_TRANSLATION).casefold().split())
+
+
 def matches(record: dict[str, Any], args: argparse.Namespace) -> bool:
     if record.get("type") == "memory_update" or record.get("status") not in ACTIVE_STATUSES:
         return False
@@ -55,11 +61,15 @@ def matches(record: dict[str, Any], args: argparse.Namespace) -> bool:
         return False
     if args.host and args.host not in values(record, "hosts"):
         return False
-    if args.task and args.task not in values(record, "tasks"):
+    if args.task and not matches_task(args.task, values(record, "tasks")):
         return False
     if args.file_path and not any(args.file_path in item or item in args.file_path for item in values(record, "paths")):
         return False
     return True
+
+
+def matches_task(requested: str, candidates: list[str]) -> bool:
+    return normalized_task(requested) in {normalized_task(item) for item in candidates}
 
 
 def recency_key(record: dict[str, Any]) -> float:
@@ -83,6 +93,8 @@ def sort_key(record: dict[str, Any]) -> tuple[int, int, int, float, str]:
 
 
 def query(path: Path, args: argparse.Namespace) -> dict[str, Any]:
+    if not path.exists():
+        return {"warning": advisory(), "warnings": [f"file does not exist: {path}"], "records": []}
     records, parse_errors = parse_jsonl(path)
     if parse_errors:
         return {"warning": advisory(), "errors": [item.issue for item in parse_errors], "records": []}
@@ -95,15 +107,24 @@ def advisory() -> str:
     return "Project learning is advisory context, not completion evidence or authorization."
 
 
+def terminal_safe(value: str) -> str:
+    encoding = sys.stdout.encoding or "utf-8"
+    return value.encode(encoding, errors="backslashreplace").decode(encoding, errors="replace")
+
+
 def main() -> int:
     args = parse_args()
     payload = query(args.path, args)
     if args.as_json:
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        print(json.dumps(payload, indent=2))
     else:
-        print(payload["warning"])
+        print(terminal_safe(payload["warning"]))
+        for warning in payload.get("warnings", []):
+            print(terminal_safe(f"warning: {warning}"))
+        for error in payload.get("errors", []):
+            print(terminal_safe(f"error: {error}"))
         for record in payload.get("records", []):
-            print(f"- {record.get('id')}: {record.get('summary')}")
+            print(terminal_safe(f"- {record.get('id')}: {record.get('summary')}"))
     return 0 if not payload.get("errors") else 2
 
 

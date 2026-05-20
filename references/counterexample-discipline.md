@@ -23,4 +23,11 @@ State:
 - surviving risk
 - receipt ids used
 
+The hypothesis, each attempted disconfirmer, and the outcome must be specific enough to
+say what was challenged, what was tried, and what was observed. Short generic outcomes
+such as `ok`, `done`, `checked`, `完成`, `erledigt`, `terminé`, `hecho`, `feito`,
+`完了`, `완료`, or similarly short multilingual equivalents are not acceptable runtime
+records. This is a specificity heuristic, not a proof that every vague phrasing can
+be detected.
+
 A counterexample check can succeed by disproving the current path, because that still prevents a false acceptance.

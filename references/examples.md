@@ -57,7 +57,7 @@ Legal stop:
 ### `runbook`
 
 ```json
-{"schema_version":"1.0","type":"runbook","id":"runbook_release_validation_order","project_id":"agent-runway","status":"active","summary":"Run release validation in the same order as release_gate.py before claiming a packaged release.","applies_to":{"tasks":["release"],"commands":["python scripts/release_gate.py ."]},"source_refs":[{"kind":"file","path":"references/release-gates.md","summary":"Release order is documented here."}],"created_at":"2026-05-08T00:00:00Z","last_verified_at":"2026-05-08T00:00:00Z","steps":["Run quick_validate.","Run package_skill_validation.","Run unit tests and smoke test."],"invalid_if":["release_gate.py changes its gate order."],"severity":"high","can_support_completion":false,"requires_fresh_verification":true}
+{"schema_version":"1.0","type":"runbook","id":"runbook_host_setup_validation","project_id":"agent-runway","status":"active","summary":"Validate host setup with quick validation, MCP tests, and smoke test before relying on Agent-Runway runtime behavior.","applies_to":{"tasks":["host setup"],"commands":["python scripts/quick_validate.py .","python -m unittest discover -s mcp/tests -p test_*.py","python scripts/smoke_test.py"]},"source_refs":[{"kind":"file","path":"README.md","summary":"Install validation order is documented here."}],"created_at":"2026-05-08T00:00:00Z","last_verified_at":"2026-05-08T00:00:00Z","steps":["Run quick_validate.","Run MCP tests.","Run smoke_test."],"invalid_if":["README host setup validation order changes."],"severity":"high","can_support_completion":false,"requires_fresh_verification":true}
 ```
 
 ### `preference`

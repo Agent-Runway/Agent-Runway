@@ -22,6 +22,7 @@ class RuntimeTestCase(unittest.TestCase):
         self.secret_path = Path(self.temp_dir.name) / "secret.key"
         os.environ["ILH_DB_PATH"] = str(self.db_path)
         os.environ["ILH_SECRET_PATH"] = str(self.secret_path)
+        os.environ["ILH_HARNESS_SECRET"] = "a" * 64
         import sys
 
         mcp_root = str(Path(__file__).resolve().parents[1])
@@ -35,6 +36,7 @@ class RuntimeTestCase(unittest.TestCase):
         self.temp_dir.cleanup()
         os.environ.pop("ILH_DB_PATH", None)
         os.environ.pop("ILH_SECRET_PATH", None)
+        os.environ.pop("ILH_HARNESS_SECRET", None)
 
     def make_bash_receipt(
         self, session_id: str, task_id: str, command: str, exit_code: int = 0
@@ -47,6 +49,43 @@ class RuntimeTestCase(unittest.TestCase):
             command_text=command,
             exit_code=exit_code,
             metadata={"stdout_sha256": "abc"},
+        )
+
+    def approve_turn_for_receipts(
+        self, session_id: str, task_id: str, receipt_ids: list[str]
+    ) -> None:
+        approved = self.server.turn_end_gate(
+            session_id=session_id,
+            task_id=task_id,
+            stop_condition="slice_verified",
+            work_summary="Verified the current slice with direct receipt evidence before completion.",
+            receipt_ids=receipt_ids,
+        )
+        self.assertIn("APPROVED", approved)
+
+    def completion_gate_after_turn(
+        self,
+        *,
+        session_id: str,
+        task_id: str,
+        criterion_receipt_map: list[dict],
+        completion_summary: str,
+        **kwargs,
+    ) -> str:
+        receipt_ids = [
+            receipt_id
+            for entry in criterion_receipt_map
+            for receipt_id in entry.get("receipt_ids", [])
+        ]
+        latest_turn = self.store.latest_approval(session_id, task_id, gate_type="turn_end_gate")
+        if not self.store.is_approval_fresh(latest_turn, session_id, task_id):
+            self.approve_turn_for_receipts(session_id, task_id, receipt_ids)
+        return self.server.completion_gate(
+            session_id=session_id,
+            task_id=task_id,
+            criterion_receipt_map=criterion_receipt_map,
+            completion_summary=completion_summary,
+            **kwargs,
         )
 
     def test_missions_are_isolated_by_session(self) -> None:
@@ -165,6 +204,54 @@ class RuntimeTestCase(unittest.TestCase):
         self.assertEqual(len(recs_a), 1)
         self.assertEqual(len(recs_b), 0)
 
+    def test_get_receipts_explicit_none_filters_to_taskless_receipts(self) -> None:
+        taskless = self.store.record_receipt(
+            session_id="s1",
+            task_id=None,
+            source="test",
+            tool_name="Bash",
+            command_text="pytest taskless",
+            exit_code=0,
+            metadata={"stdout_sha256": "taskless"},
+        )
+        scoped = self.store.record_receipt(
+            session_id="s1",
+            task_id="task-a",
+            source="test",
+            tool_name="Bash",
+            command_text="pytest task-a",
+            exit_code=0,
+            metadata={"stdout_sha256": "task-a"},
+        )
+
+        all_session = self.store.get_receipts(
+            [taskless.receipt_id, scoped.receipt_id], session_id="s1"
+        )
+        taskless_only = self.store.get_receipts(
+            [taskless.receipt_id, scoped.receipt_id], session_id="s1", task_id=None
+        )
+
+        self.assertEqual({item.receipt_id for item in all_session}, {taskless.receipt_id, scoped.receipt_id})
+        self.assertEqual([item.receipt_id for item in taskless_only], [taskless.receipt_id])
+
+    def test_get_receipts_omitted_task_id_keeps_session_wide_lookup(self) -> None:
+        receipt_ids = []
+        for task_id in (None, "task-a", "task-b"):
+            receipt = self.store.record_receipt(
+                session_id="s1",
+                task_id=task_id,
+                source="test",
+                tool_name="Bash",
+                command_text=f"pytest {task_id or 'taskless'}",
+                exit_code=0,
+                metadata={"stdout_sha256": task_id or "taskless"},
+            )
+            receipt_ids.append(receipt.receipt_id)
+
+        found = self.store.get_receipts(receipt_ids, session_id="s1")
+
+        self.assertEqual({item.receipt_id for item in found}, set(receipt_ids))
+
     def test_completion_gate_requires_all_criteria(self) -> None:
         self.server.mission_lock("s1", "t1", "ship fix", ["tests pass", "file changed"])
         receipt = self.make_bash_receipt("s1", "t1", "pytest -q", exit_code=0)
@@ -184,12 +271,13 @@ class RuntimeTestCase(unittest.TestCase):
     def test_completion_gate_rejects_unknown_criterion_mapping(self) -> None:
         self.server.mission_lock("s1", "t1", "ship fix", ["tests pass"])
         receipt = self.make_bash_receipt("s1", "t1", "pytest -q", exit_code=0)
+        extra = self.make_bash_receipt("s1", "t1", "pytest -q --extra", exit_code=0)
         rejected = self.server.completion_gate(
             session_id="s1",
             task_id="t1",
             criterion_receipt_map=[
                 {"criterion": "tests pass", "receipt_ids": [receipt.receipt_id]},
-                {"criterion": "bonus evidence", "receipt_ids": [receipt.receipt_id]},
+                {"criterion": "bonus evidence", "receipt_ids": [extra.receipt_id]},
             ],
             completion_summary="Included an extra criterion mapping that is not part of the mission contract.",
         )
@@ -199,22 +287,22 @@ class RuntimeTestCase(unittest.TestCase):
     def test_completion_gate_rejects_same_receipt_reused_for_multiple_criteria_when_one_is_semantically_invalid(self) -> None:
         self.server.mission_lock("s1", "t1", "ship fix", ["tests pass", "file changed"])
         receipt = self.make_bash_receipt("s1", "t1", "pytest -q", exit_code=0)
-        rejected = self.server.completion_gate(
-            session_id="s1",
-            task_id="t1",
-            criterion_receipt_map=[
-                {"criterion": "tests pass", "receipt_ids": [receipt.receipt_id]},
-                {"criterion": "file changed", "receipt_ids": [receipt.receipt_id]},
-            ],
-            completion_summary="Reused one test execution receipt for both the test and file-change criteria to audit criterion mixing.",
-        )
-        self.assertIn("REJECTED", rejected)
-        self.assertIn("file changed", rejected)
+        with self.assertRaisesRegex(ValueError, "may not be reused across multiple criteria"):
+            self.server.completion_gate(
+                session_id="s1",
+                task_id="t1",
+                criterion_receipt_map=[
+                    {"criterion": "tests pass", "receipt_ids": [receipt.receipt_id]},
+                    {"criterion": "file changed", "receipt_ids": [receipt.receipt_id]},
+                ],
+                completion_summary="Reused one test execution receipt for both the test and file-change criteria to audit criterion mixing.",
+            )
 
     def test_completion_gate_marks_done_when_all_criteria_are_covered(self) -> None:
         self.server.mission_lock("s1", "t1", "ship fix", ["tests pass"])
         receipt = self.make_bash_receipt("s1", "t1", "pytest -q", exit_code=0)
-        approved = self.server.completion_gate(
+        self.approve_turn_for_receipts("s1", "t1", [receipt.receipt_id])
+        approved = self.completion_gate_after_turn(
             session_id="s1",
             task_id="t1",
             criterion_receipt_map=[
@@ -225,6 +313,27 @@ class RuntimeTestCase(unittest.TestCase):
         self.assertIn("APPROVED", approved)
         status = self.server.mission_status("s1", "t1")
         self.assertIn("status: completed", status)
+
+    def test_completion_gate_rejects_direct_single_slice_completion_without_turn_end_gate(
+        self,
+    ) -> None:
+        self.server.mission_lock("s1", "direct-complete", "ship fix", ["tests pass"])
+        receipt = self.make_bash_receipt("s1", "direct-complete", "pytest -q", exit_code=0)
+
+        rejected = self.server.completion_gate(
+            session_id="s1",
+            task_id="direct-complete",
+            criterion_receipt_map=[
+                {"criterion": "tests pass", "receipt_ids": [receipt.receipt_id]}
+            ],
+            completion_summary="Ran the required test command and completed the single verification slice directly.",
+        )
+
+        self.assertIn("REJECTED", rejected)
+        self.assertIn("fresh approved turn_end_gate", rejected)
+        status = self.server.mission_status("s1", "direct-complete")
+        self.assertIn("status: active", status)
+        self.assertNotIn("latest_turn_gate:", status)
 
     def test_decision_records_and_counterexamples_can_be_logged(self) -> None:
         self.server.mission_lock("s1", "t1", "analyze change", ["tests pass"])
@@ -335,7 +444,8 @@ class RuntimeTestCase(unittest.TestCase):
             [receipt.receipt_id],
             "hidden corpus risk remains",
         )
-        approved = self.server.completion_gate(
+        self.approve_turn_for_receipts("s1", "t1", [receipt.receipt_id])
+        approved = self.completion_gate_after_turn(
             session_id="s1",
             task_id="t1",
             criterion_receipt_map=[
@@ -372,7 +482,7 @@ class RuntimeTestCase(unittest.TestCase):
                 "s1", [receipt.receipt_id, receipt.receipt_id], "dup-verify"
             )
 
-    def test_list_recent_receipts_whitespace_scope_prefers_active_mission(self) -> None:
+    def test_list_recent_receipts_whitespace_scope_is_session_wide_when_multiple_active(self) -> None:
         self.server.mission_lock("s1", "task-a", "goal", ["criterion"])
         self.server.mission_lock("s1", "task-b", "goal", ["criterion"])
         receipt_a = self.make_bash_receipt("s1", "task-a", "pytest task_a", exit_code=0)
@@ -384,17 +494,22 @@ class RuntimeTestCase(unittest.TestCase):
         self.assertIn(receipt_a.receipt_id, scoped)
         self.assertNotIn(receipt_b.receipt_id, scoped)
         self.assertIn(receipt_b.receipt_id, whitespace_all)
-        self.assertNotIn(receipt_a.receipt_id, whitespace_all)
+        self.assertIn(receipt_a.receipt_id, whitespace_all)
 
-    def test_mission_status_trims_whitespace_task_scope(self) -> None:
+    def test_mission_status_requires_task_scope_when_multiple_active(self) -> None:
         self.server.mission_lock("s1", "task-a", "goal a", ["criterion a"])
         self.server.mission_lock("s1", "task-b", "goal b", ["criterion b"])
 
         explicit = self.server.mission_status("s1", "task-b")
-        implicit = self.server.mission_status("s1", "   ")
+        implicit = json.loads(self.server.mission_status("s1", "   "))
 
         self.assertIn("task_id: task-b", explicit)
-        self.assertIn("task_id: task-b", implicit)
+        self.assertEqual("Multiple active missions; specify task_id.", implicit["error"])
+        self.assertEqual(2, len(implicit["candidate_missions"]))
+        self.assertEqual(
+            {"task-a", "task-b"},
+            {item["task_id"] for item in implicit["candidate_missions"]},
+        )
 
     def test_verify_receipt_integrity_trims_whitespace_task_scope(self) -> None:
         self.server.mission_lock("s1", "verify-task", "goal", ["criterion"])
@@ -440,6 +555,7 @@ class RuntimeTestCase(unittest.TestCase):
     ) -> None:
         self.server.mission_lock("s1", "task-b", "goal b", ["criterion b"])
         receipt = self.make_bash_receipt("s1", "task-b", "pytest -q", exit_code=0)
+        self.approve_turn_for_receipts("s1", "task-b", [receipt.receipt_id])
         self.server.completion_gate(
             session_id="s1",
             task_id="task-b",
@@ -528,7 +644,7 @@ class RuntimeTestCase(unittest.TestCase):
         packet = json.loads(self.server.export_handoff_packet("s1", "t1"))
         self.assertEqual(packet["recommended_next_action"], status["wrap_up_guidance"])
 
-    def test_relocking_mission_resets_slice_count_and_created_at(self) -> None:
+    def test_relocking_active_mission_is_rejected(self) -> None:
         self.server.mission_lock("s1", "t1", "initial goal", ["criterion"], slice_budget=4)
         for index in range(3):
             receipt = self.make_bash_receipt("s1", "t1", f"python slice_{index}.py")
@@ -545,20 +661,12 @@ class RuntimeTestCase(unittest.TestCase):
                 ("2000-01-01T00:00:00Z", "s1", "t1"),
             )
 
-        self.server.mission_lock("s1", "t1", "relocked goal", ["criterion"], slice_budget=2)
-        mission = self.store.get_mission("s1", "t1")
-        self.assertEqual(mission.slice_count, 0)
-        self.assertNotEqual(mission.created_at, "2000-01-01T00:00:00Z")
+        with self.assertRaisesRegex(ValueError, "relocking an active mission"):
+            self.server.mission_lock("s1", "t1", "relocked goal", ["criterion"], slice_budget=2)
 
-        receipt = self.make_bash_receipt("s1", "t1", "python after_relock.py")
-        approved = self.server.turn_end_gate(
-            session_id="s1",
-            task_id="t1",
-            stop_condition="slice_verified",
-            work_summary="Verified a fresh slice after relocking the mission with a smaller budget.",
-            receipt_ids=[receipt.receipt_id],
-        )
-        self.assertIn("APPROVED", approved)
+        mission = self.store.get_mission("s1", "t1")
+        self.assertEqual(mission.slice_count, 3)
+        self.assertEqual(mission.created_at, "2000-01-01T00:00:00Z")
 
     def test_mission_lock_preserves_existing_session_host_and_cwd(self) -> None:
         self.server.mission_lock(
@@ -737,40 +845,240 @@ class RuntimeTestCase(unittest.TestCase):
             "single outbound email only",
         )
 
+    def test_record_user_authorization_rejects_negative_ttl_seconds(self) -> None:
+        self.server.mission_lock("s1", "ttl-negative", "goal", ["criterion"])
+
+        with self.assertRaisesRegex(ValueError, "ttl_seconds"):
+            self.server.record_user_authorization(
+                "s1",
+                "ttl-negative",
+                "publish docs",
+                "docs branch only",
+                "User approved the docs publish.",
+                False,
+                -1,
+            )
+
     def test_record_user_authorization_clamps_ttl_seconds_bounds(self) -> None:
-        self.server.mission_lock("s1", "ttl-low", "goal", ["criterion"])
-        low_record = self.server.record_user_authorization(
+        cases = [
+            ("ttl-zero", 0, 60),
+            ("ttl-fifty-nine", 59, 60),
+            ("ttl-sixty", 60, 60),
+            ("ttl-max", 7200, 7200),
+            ("ttl-above-max", 7201, 7200),
+        ]
+
+        for task_id, ttl_seconds, expected_seconds in cases:
+            with self.subTest(ttl_seconds=ttl_seconds):
+                self.server.mission_lock("s1", task_id, "goal", ["criterion"])
+                recorded = self.server.record_user_authorization(
+                    "s1",
+                    task_id,
+                    "publish docs",
+                    "docs branch only",
+                    "User approved the docs publish.",
+                    False,
+                    ttl_seconds,
+                )
+                self.assertIn("USER AUTHORIZATION RECORDED", recorded)
+                approval = self.store.latest_approval("s1", task_id, "user_authorization")
+                self.assertIsNotNone(approval)
+                created = datetime.fromisoformat(approval.created_at.replace("Z", "+00:00"))
+                expires = datetime.fromisoformat(approval.expires_at.replace("Z", "+00:00"))
+                self.assertEqual(int((expires - created).total_seconds()), expected_seconds)
+
+    def test_record_user_authorization_standing_boundary_keeps_never_expiry(self) -> None:
+        self.server.mission_lock("s1", "ttl-standing", "goal", ["criterion"])
+        recorded = self.server.record_user_authorization(
             "s1",
-            "ttl-low",
-            "publish docs",
-            "docs branch only",
-            "User approved the docs publish.",
+            "ttl-standing",
+            "push verified changes to Gitea",
+            "Gitea push only; GitHub still requires authorization.",
+            "gitea不需要我授权 但github需要我授权",
+            False,
+            -1,
+            "standing_boundary",
+        )
+
+        self.assertIn("expires_at: never", recorded)
+        status = json.loads(self.server.authorization_status("s1", "ttl-standing"))
+        self.assertEqual(status["authorization"]["expires_at"], "never")
+
+    def test_standing_authority_boundary_does_not_expire_or_stale(self) -> None:
+        self.server.mission_lock("s1", "gitea-policy", "goal", ["criterion"])
+        recorded = self.server.record_user_authorization(
+            "s1",
+            "gitea-policy",
+            "push verified changes to Gitea",
+            "Gitea does not require further user authorization; GitHub still requires authorization.",
+            "gitea不需要我授权 但github需要我授权",
             False,
             1,
+            "standing_boundary",
         )
-        self.assertIn("USER AUTHORIZATION RECORDED", low_record)
-        low_approval = self.store.latest_approval("s1", "ttl-low", "user_authorization")
-        self.assertIsNotNone(low_approval)
-        low_created = datetime.fromisoformat(low_approval.created_at.replace("Z", "+00:00"))
-        low_expires = datetime.fromisoformat(low_approval.expires_at.replace("Z", "+00:00"))
-        self.assertEqual(int((low_expires - low_created).total_seconds()), 60)
 
-        self.server.mission_lock("s1", "ttl-high", "goal", ["criterion"])
-        high_record = self.server.record_user_authorization(
+        self.assertIn("authorization_kind: standing_boundary", recorded)
+        self.assertIn("expires_at: never", recorded)
+        status = json.loads(self.server.authorization_status("s1", "gitea-policy"))
+        self.assertTrue(status["authorization"]["fresh"])
+        self.assertEqual(status["authorization"]["authorization_kind"], "standing_boundary")
+        self.assertEqual(status["authorization"]["expires_at"], "never")
+
+        self.make_bash_receipt("s1", "gitea-policy", "python verify.py", exit_code=0)
+        after_receipt = json.loads(self.server.authorization_status("s1", "gitea-policy"))
+        self.assertTrue(after_receipt["authorization"]["fresh"])
+
+        with self.assertRaisesRegex(ValueError, "relocking an active mission"):
+            self.server.mission_lock("s1", "gitea-policy", "refreshed goal", ["criterion"])
+        after_rejected_relock = json.loads(self.server.authorization_status("s1", "gitea-policy"))
+        self.assertTrue(after_rejected_relock["authorization"]["fresh"])
+
+    def test_record_user_authorization_rejects_irreversible_wildcard_standing_boundary(
+        self,
+    ) -> None:
+        cases = [
+            ("wildcard-standing-a", "*", "full"),
+            ("wildcard-standing-b", "all", "gitea and github forever"),
+            ("wildcard-standing-c", "push releases", "full"),
+        ]
+
+        for task_id, action_scope, approval_scope in cases:
+            with self.subTest(action_scope=action_scope, approval_scope=approval_scope):
+                self.server.mission_lock("s1", task_id, "goal", ["criterion"])
+                with self.assertRaisesRegex(ValueError, "standing_boundary"):
+                    self.server.record_user_authorization(
+                        "s1",
+                        task_id,
+                        action_scope,
+                        approval_scope,
+                        "Do not ask me again.",
+                        True,
+                        1,
+                        "standing_boundary",
+                    )
+
+    def test_record_user_authorization_rejects_irreversible_narrow_standing_boundary(
+        self,
+    ) -> None:
+        self.server.mission_lock("s1", "narrow-standing", "goal", ["criterion"])
+        with self.assertRaisesRegex(ValueError, "standing_boundary"):
+            self.server.record_user_authorization(
+                "s1",
+                "narrow-standing",
+                "publish the signed release notes to the internal audit mailbox",
+                "internal audit mailbox only; no public release surfaces",
+                "You do not need to ask me again for that internal audit mail step.",
+                True,
+                1,
+                "standing_boundary",
+            )
+
+    def test_record_user_authorization_allows_irreversible_scoped_approval(self) -> None:
+        self.server.mission_lock("s1", "scoped-irreversible", "goal", ["criterion"])
+        recorded = self.server.record_user_authorization(
             "s1",
-            "ttl-high",
-            "publish docs",
-            "docs branch only",
-            "User approved the docs publish.",
-            False,
-            999999,
+            "scoped-irreversible",
+            "send one outbound status email",
+            "single outbound email only",
+            "Yes, send that one email.",
+            True,
+            900,
+            "scoped_approval",
         )
-        self.assertIn("USER AUTHORIZATION RECORDED", high_record)
-        high_approval = self.store.latest_approval("s1", "ttl-high", "user_authorization")
-        self.assertIsNotNone(high_approval)
-        high_created = datetime.fromisoformat(high_approval.created_at.replace("Z", "+00:00"))
-        high_expires = datetime.fromisoformat(high_approval.expires_at.replace("Z", "+00:00"))
-        self.assertEqual(int((high_expires - high_created).total_seconds()), 7200)
+
+        self.assertIn("USER AUTHORIZATION RECORDED", recorded)
+        status = json.loads(self.server.authorization_status("s1", "scoped-irreversible"))
+        self.assertTrue(status["authorization"]["irreversible"])
+        self.assertEqual(status["authorization"]["authorization_kind"], "scoped_approval")
+
+    def test_authorization_status_matching_action_scope_keeps_standing_boundary_fresh(self) -> None:
+        self.server.mission_lock("s1", "gitea-scope", "goal", ["criterion"])
+        self.server.record_user_authorization(
+            "s1",
+            "gitea-scope",
+            "push verified changes to Gitea",
+            "Gitea push only; GitHub still requires authorization.",
+            "gitea不需要我授权 但github需要我授权",
+            False,
+            1,
+            "standing_boundary",
+        )
+
+        try:
+            status = json.loads(
+                self.server.authorization_status(
+                    "s1",
+                    "gitea-scope",
+                    action_scope="PUSH\u200b  VERIFIED\nCHANGES\tTO GITEA",
+                )
+            )
+        except TypeError as exc:
+            self.fail(f"authorization_status should accept action_scope: {exc}")
+        authorization = status["authorization"]
+        self.assertTrue(authorization["fresh"])
+        self.assertEqual(authorization["requested_action_scope"], "push verified changes to gitea")
+        self.assertTrue(authorization["scope_matches_requested_action"])
+
+    def test_authorization_status_mismatched_action_scope_is_not_fresh(self) -> None:
+        self.server.mission_lock("s1", "gitea-mismatch", "goal", ["criterion"])
+        self.server.record_user_authorization(
+            "s1",
+            "gitea-mismatch",
+            "push verified changes to Gitea",
+            "Gitea push only; GitHub still requires authorization.",
+            "gitea不需要我授权 但github需要我授权",
+            False,
+            1,
+            "standing_boundary",
+        )
+
+        try:
+            status = json.loads(
+                self.server.authorization_status(
+                    "s1",
+                    "gitea-mismatch",
+                    action_scope="push verified changes to GitHub",
+                )
+            )
+        except TypeError as exc:
+            self.fail(f"authorization_status should accept action_scope: {exc}")
+        authorization = status["authorization"]
+        self.assertFalse(authorization["fresh"])
+        self.assertEqual(authorization["requested_action_scope"], "push verified changes to github")
+        self.assertFalse(authorization["scope_matches_requested_action"])
+
+    def test_authorization_status_without_action_scope_keeps_previous_freshness(self) -> None:
+        self.server.mission_lock("s1", "implicit-scope", "goal", ["criterion"])
+        self.server.record_user_authorization(
+            "s1",
+            "implicit-scope",
+            "send one email",
+            "single email only",
+            "Yes, do it.",
+            True,
+            900,
+        )
+
+        status = json.loads(self.server.authorization_status("s1", "implicit-scope"))
+        authorization = status["authorization"]
+        self.assertTrue(authorization["fresh"])
+        self.assertEqual(authorization["requested_action_scope"], "")
+        self.assertIsNone(authorization["scope_matches_requested_action"])
+
+    def test_store_rejects_never_expiring_non_standing_approvals(self) -> None:
+        self.server.mission_lock("s1", "bad-never", "goal", ["criterion"])
+
+        with self.assertRaisesRegex(ValueError, "ttl_seconds=None requires standing_boundary"):
+            self.store.create_approval(
+                "s1",
+                "bad-never",
+                "user_authorization",
+                True,
+                "bad approval",
+                self.store.latest_receipt_seq("s1"),
+                ttl_seconds=None,
+                meta={"authorization_kind": "scoped_approval"},
+            )
 
     def test_authorization_status_uses_latest_approval_when_timestamps_tie(self) -> None:
         self.server.mission_lock("s1", "t1", "goal", ["criterion"])
@@ -801,7 +1109,7 @@ class RuntimeTestCase(unittest.TestCase):
         self.assertEqual(status["authorization"]["approval_scope"], "second scope")
         self.assertTrue(status["authorization"]["irreversible"])
 
-    def test_relock_clears_user_authorization_freshness(self) -> None:
+    def test_relock_rejected_preserves_user_authorization_freshness(self) -> None:
         self.server.mission_lock("s1", "t1", "goal one", ["criterion"])
         self.server.record_user_authorization(
             "s1",
@@ -815,11 +1123,12 @@ class RuntimeTestCase(unittest.TestCase):
         before = json.loads(self.server.authorization_status("s1", "t1"))
         self.assertTrue(before["authorization"]["fresh"])
 
-        self.server.mission_lock("s1", "t1", "goal two", ["criterion"])
+        with self.assertRaisesRegex(ValueError, "relocking an active mission"):
+            self.server.mission_lock("s1", "t1", "goal two", ["criterion"])
         after = json.loads(self.server.authorization_status("s1", "t1"))
-        self.assertIsNone(after["authorization"])
+        self.assertTrue(after["authorization"]["fresh"])
 
-    def test_relock_clears_latest_turn_gate_freshness(self) -> None:
+    def test_relock_rejected_preserves_latest_turn_gate_freshness(self) -> None:
         self.server.mission_lock("s1", "t1", "goal one", ["criterion"])
         receipt = self.make_bash_receipt("s1", "t1", "pytest -q", exit_code=0)
         self.server.turn_end_gate(
@@ -832,10 +1141,10 @@ class RuntimeTestCase(unittest.TestCase):
         before = self.server.mission_status("s1", "t1")
         self.assertIn("latest_turn_gate_fresh: True", before)
 
-        self.server.mission_lock("s1", "t1", "goal two", ["criterion"])
+        with self.assertRaisesRegex(ValueError, "relocking an active mission"):
+            self.server.mission_lock("s1", "t1", "goal two", ["criterion"])
         after = self.server.mission_status("s1", "t1")
-        self.assertNotIn("latest_turn_gate:", after)
-        self.assertNotIn("latest_turn_gate_fresh: True", after)
+        self.assertIn("latest_turn_gate_fresh: True", after)
 
     def test_handoff_packet_includes_budget_snapshot_and_completion_notes(self) -> None:
         self.server.mission_lock(
@@ -847,6 +1156,7 @@ class RuntimeTestCase(unittest.TestCase):
             risk_budget="local reversible edits only",
         )
         receipt = self.make_bash_receipt("s1", "t1", "pytest -q", exit_code=0)
+        self.approve_turn_for_receipts("s1", "t1", [receipt.receipt_id])
         self.server.completion_gate(
             session_id="s1",
             task_id="t1",
@@ -870,7 +1180,7 @@ class RuntimeTestCase(unittest.TestCase):
         self.store.record_receipt(
             session_id="s1",
             task_id="stale-task",
-            source="test",
+            source="claude-hook",
             tool_name="Edit",
             command_text="src/core.py",
             exit_code=0,
@@ -893,7 +1203,7 @@ class RuntimeTestCase(unittest.TestCase):
         edit = self.store.record_receipt(
             session_id="s1",
             task_id="launder-task",
-            source="test",
+            source="claude-hook",
             tool_name="Edit",
             command_text="src/core.py",
             exit_code=0,
@@ -916,7 +1226,7 @@ class RuntimeTestCase(unittest.TestCase):
         self.store.record_receipt(
             session_id="s1",
             task_id="read-launder-task",
-            source="test",
+            source="claude-hook",
             tool_name="Edit",
             command_text="src/core.py",
             exit_code=0,
@@ -947,14 +1257,14 @@ class RuntimeTestCase(unittest.TestCase):
         self.store.record_receipt(
             session_id="s1",
             task_id="fresh-task",
-            source="test",
+            source="claude-hook",
             tool_name="Edit",
             command_text="src/core.py",
             exit_code=0,
             metadata={"file_path": "src/core.py"},
         )
         fresh_test = self.make_bash_receipt("s1", "fresh-task", "pytest -q")
-        approved = self.server.completion_gate(
+        approved = self.completion_gate_after_turn(
             session_id="s1",
             task_id="fresh-task",
             criterion_receipt_map=[
@@ -973,7 +1283,7 @@ class RuntimeTestCase(unittest.TestCase):
         self.assertEqual(authorization["error"], "No mission found for this session/task.")
         self.assertEqual(handoff["error"], "No mission found for this session/task.")
 
-    def test_relocked_deleted_approval_object_is_not_fresh(self) -> None:
+    def test_relock_rejected_does_not_delete_approval_object(self) -> None:
         self.server.mission_lock("s1", "approval-task", "goal one", ["criterion"])
         receipt = self.make_bash_receipt("s1", "approval-task", "pytest -q")
         self.server.turn_end_gate(
@@ -986,8 +1296,9 @@ class RuntimeTestCase(unittest.TestCase):
         approval = self.store.latest_approval("s1", "approval-task", "turn_end_gate")
         self.assertTrue(self.store.is_approval_fresh(approval, "s1", "approval-task"))
 
-        self.server.mission_lock("s1", "approval-task", "goal two", ["criterion"])
-        self.assertFalse(self.store.is_approval_fresh(approval, "s1", "approval-task"))
+        with self.assertRaisesRegex(ValueError, "relocking an active mission"):
+            self.server.mission_lock("s1", "approval-task", "goal two", ["criterion"])
+        self.assertTrue(self.store.is_approval_fresh(approval, "s1", "approval-task"))
 
     def test_receipts_from_same_session_invalidate_gate_approval(self) -> None:
         self.server.mission_lock("s1", "freshness-task", "goal", ["criterion"])
@@ -1019,7 +1330,7 @@ class RuntimeTestCase(unittest.TestCase):
         self.store.record_receipt(
             session_id="s1",
             task_id="deep-stale-task",
-            source="test",
+            source="claude-hook",
             tool_name="Edit",
             command_text="src/core.py",
             exit_code=0,
@@ -1228,13 +1539,58 @@ class RuntimeTestCase(unittest.TestCase):
     def test_completion_gate_accepts_execution_receipt_for_tests_pass(self) -> None:
         self.server.mission_lock("s1", "semantic-good-task", "goal", ["tests pass"])
         receipt = self.make_bash_receipt("s1", "semantic-good-task", "pytest -q")
-        approved = self.server.completion_gate(
+        self.approve_turn_for_receipts("s1", "semantic-good-task", [receipt.receipt_id])
+        approved = self.completion_gate_after_turn(
             session_id="s1",
             task_id="semantic-good-task",
             criterion_receipt_map=[
                 {"criterion": "tests pass", "receipt_ids": [receipt.receipt_id]}
             ],
             completion_summary="Mapped the tests criterion to a successful test execution receipt.",
+        )
+        self.assertIn("APPROVED", approved)
+
+    def test_completion_gate_rejects_unknown_exit_code_for_tests_pass(self) -> None:
+        self.server.mission_lock("s1", "unknown-exit-task", "goal", ["tests pass"])
+        receipt = self.store.record_receipt(
+            session_id="s1",
+            task_id="unknown-exit-task",
+            source="test",
+            tool_name="Bash",
+            command_text="pytest -q",
+            exit_code=None,
+            metadata={"stdout_sha256": "abc"},
+        )
+        rejected = self.server.completion_gate(
+            session_id="s1",
+            task_id="unknown-exit-task",
+            criterion_receipt_map=[
+                {"criterion": "tests pass", "receipt_ids": [receipt.receipt_id]}
+            ],
+            completion_summary="Mapped the tests criterion to an execution receipt whose exit status was not recorded.",
+        )
+        self.assertIn("REJECTED", rejected)
+        self.assertIn("exit", rejected.lower())
+
+    def test_completion_gate_allows_unknown_exit_code_for_observational_receipt(self) -> None:
+        self.server.mission_lock("s1", "unknown-read-exit-task", "goal", ["analyze chapter themes"])
+        receipt = self.store.record_receipt(
+            session_id="s1",
+            task_id="unknown-read-exit-task",
+            source="test",
+            tool_name="Read",
+            command_text="notes.md",
+            exit_code=None,
+            metadata={},
+        )
+        self.approve_turn_for_receipts("s1", "unknown-read-exit-task", [receipt.receipt_id])
+        approved = self.completion_gate_after_turn(
+            session_id="s1",
+            task_id="unknown-read-exit-task",
+            criterion_receipt_map=[
+                {"criterion": "analyze chapter themes", "receipt_ids": [receipt.receipt_id]}
+            ],
+            completion_summary="Mapped an analysis-only criterion to an observational receipt whose exit status was not recorded.",
         )
         self.assertIn("APPROVED", approved)
 
@@ -1249,7 +1605,7 @@ class RuntimeTestCase(unittest.TestCase):
             exit_code=0,
             metadata={},
         )
-        approved = self.server.completion_gate(
+        approved = self.completion_gate_after_turn(
             session_id="s1",
             task_id="shell-task",
             criterion_receipt_map=[
@@ -1270,7 +1626,8 @@ class RuntimeTestCase(unittest.TestCase):
             exit_code=0,
             metadata={},
         )
-        approved = self.server.completion_gate(
+        self.approve_turn_for_receipts("s1", "codex-task", [receipt.receipt_id])
+        approved = self.completion_gate_after_turn(
             session_id="s1",
             task_id="codex-task",
             criterion_receipt_map=[
@@ -1325,7 +1682,7 @@ class RuntimeTestCase(unittest.TestCase):
             with self.subTest(criterion=criterion):
                 self.server.mission_lock("s1", task_id, "goal", [criterion])
                 receipt = self.make_bash_receipt("s1", task_id, f"python -m task_runner --goal \"{criterion}\"")
-                approved = self.server.completion_gate(
+                approved = self.completion_gate_after_turn(
                     session_id="s1",
                     task_id=task_id,
                     criterion_receipt_map=[
@@ -1372,13 +1729,13 @@ class RuntimeTestCase(unittest.TestCase):
                 receipt = self.store.record_receipt(
                     session_id="s1",
                     task_id=task_id,
-                    source="test",
+                    source="claude-hook",
                     tool_name="Edit",
                     command_text=path,
                     exit_code=0,
                     metadata={"file_path": path},
                 )
-                approved = self.server.completion_gate(
+                approved = self.completion_gate_after_turn(
                     session_id="s1",
                     task_id=task_id,
                     criterion_receipt_map=[
@@ -1408,7 +1765,7 @@ class RuntimeTestCase(unittest.TestCase):
                     exit_code=0,
                     metadata={},
                 )
-                approved = self.server.completion_gate(
+                approved = self.completion_gate_after_turn(
                     session_id="s1",
                     task_id=task_id,
                     criterion_receipt_map=[
@@ -1449,6 +1806,73 @@ class RuntimeTestCase(unittest.TestCase):
                 self.assertIn("REJECTED", rejected)
                 self.assertIn("semantic", rejected.lower())
 
+    def test_completion_gate_allows_observational_receipt_for_negated_action_constraints(
+        self,
+    ) -> None:
+        cases = [
+            ("neg-cn-1", "绝对不能执行 GitHub push 或 GitHub public release-state 修改"),
+            ("neg-cn-2", "严格禁止运行回测、扫描漏洞或更新生产配置"),
+            ("neg-en-1", "do not run tests, build artifacts, or modify production config"),
+            ("neg-en-2", "refrain from executing deployment scripts and avoid updating docs"),
+            ("neg-ja-1", "デプロイスクリプトを実行しない、設定を変更しない"),
+            ("neg-ko-1", "배포 스크립트를 실행하지 마, 설정을 수정하지 마"),
+            ("neg-fr-1", "ne pas exécuter les tests et sans modifier la configuration"),
+            ("neg-es-1", "no ejecutar pruebas y sin modificar la configuración"),
+            ("neg-de-1", "nicht ausführen und keine Konfiguration ändern"),
+            ("neg-pt-1", "não executar testes e sem modificar a configuração"),
+        ]
+        for task_id, criterion in cases:
+            with self.subTest(criterion=criterion):
+                self.server.mission_lock("s1", task_id, "goal", [criterion])
+                receipt = self.store.record_receipt(
+                    session_id="s1",
+                    task_id=task_id,
+                    source="test",
+                    tool_name="Read",
+                    command_text="notes.md",
+                    exit_code=0,
+                    metadata={},
+                )
+                approved = self.completion_gate_after_turn(
+                    session_id="s1",
+                    task_id=task_id,
+                    criterion_receipt_map=[
+                        {"criterion": criterion, "receipt_ids": [receipt.receipt_id]}
+                    ],
+                    completion_summary="Mapped negated action constraints to observational boundary-check evidence.",
+                )
+                self.assertIn("APPROVED", approved)
+
+    def test_completion_gate_rejects_observational_receipt_for_double_negated_actions(
+        self,
+    ) -> None:
+        cases = [
+            ("double-cn-1", "不是不执行回归测试，而是必须执行回归测试"),
+            ("double-en-1", "do not skip running tests before completion"),
+        ]
+        for task_id, criterion in cases:
+            with self.subTest(criterion=criterion):
+                self.server.mission_lock("s1", task_id, "goal", [criterion])
+                receipt = self.store.record_receipt(
+                    session_id="s1",
+                    task_id=task_id,
+                    source="test",
+                    tool_name="Read",
+                    command_text="notes.md",
+                    exit_code=0,
+                    metadata={},
+                )
+                rejected = self.server.completion_gate(
+                    session_id="s1",
+                    task_id=task_id,
+                    criterion_receipt_map=[
+                        {"criterion": criterion, "receipt_ids": [receipt.receipt_id]}
+                    ],
+                    completion_summary="Mapped double-negated execution criteria to observational evidence for audit.",
+                )
+                self.assertIn("REJECTED", rejected)
+                self.assertIn("semantic", rejected.lower())
+
     def test_completion_gate_accepts_mutation_receipt_for_chinese_mutation_criteria(
         self,
     ) -> None:
@@ -1463,13 +1887,13 @@ class RuntimeTestCase(unittest.TestCase):
                 receipt = self.store.record_receipt(
                     session_id="s1",
                     task_id=task_id,
-                    source="test",
+                    source="claude-hook",
                     tool_name="Edit",
                     command_text=path,
                     exit_code=0,
                     metadata={"file_path": path},
                 )
-                approved = self.server.completion_gate(
+                approved = self.completion_gate_after_turn(
                     session_id="s1",
                     task_id=task_id,
                     criterion_receipt_map=[
@@ -1498,7 +1922,7 @@ class RuntimeTestCase(unittest.TestCase):
                     exit_code=0,
                     metadata={},
                 )
-                approved = self.server.completion_gate(
+                approved = self.completion_gate_after_turn(
                     session_id="s1",
                     task_id=task_id,
                     criterion_receipt_map=[
@@ -1507,6 +1931,62 @@ class RuntimeTestCase(unittest.TestCase):
                     completion_summary="将中文分析型标准映射到观察型凭证，用于验证系统不会把研究类任务误判成执行或修改任务。",
                 )
                 self.assertIn("APPROVED", approved)
+
+    def test_completion_gate_allows_observational_receipt_for_negative_chinese_constraint(
+        self,
+    ) -> None:
+        self.server.mission_lock(
+            "s1",
+            "cn-negative-constraint-task",
+            "goal",
+            ["不执行任何 GitHub push 或 GitHub public release-state 修改"],
+        )
+        receipt = self.store.record_receipt(
+            session_id="s1",
+            task_id="cn-negative-constraint-task",
+            source="test",
+            tool_name="Read",
+            command_text="release-notes.md",
+            exit_code=0,
+            metadata={},
+        )
+        approved = self.completion_gate_after_turn(
+            session_id="s1",
+            task_id="cn-negative-constraint-task",
+            criterion_receipt_map=[
+                {
+                    "criterion": "不执行任何 GitHub push 或 GitHub public release-state 修改",
+                    "receipt_ids": [receipt.receipt_id],
+                }
+            ],
+            completion_summary="已核对当前任务边界与记录，确认本轮以只读验证方式完成约束检查。",
+        )
+        self.assertIn("APPROVED", approved)
+
+    def test_completion_gate_allows_execution_when_mutation_token_is_negated_in_chinese(
+        self,
+    ) -> None:
+        self.server.mission_lock(
+            "s1",
+            "cn-negated-mutation-mixed-task",
+            "goal",
+            ["运行回归测试并不修改发布标签"],
+        )
+        receipt = self.make_bash_receipt(
+            "s1", "cn-negated-mutation-mixed-task", "pytest -q"
+        )
+        approved = self.completion_gate_after_turn(
+            session_id="s1",
+            task_id="cn-negated-mutation-mixed-task",
+            criterion_receipt_map=[
+                {
+                    "criterion": "运行回归测试并不修改发布标签",
+                    "receipt_ids": [receipt.receipt_id],
+                }
+            ],
+            completion_summary="已完成回归测试执行并核对约束，确认本轮未触碰发布标签。",
+        )
+        self.assertIn("APPROVED", approved)
 
     def test_completion_gate_rejects_execution_only_receipt_for_mixed_execution_and_mutation_criterion(
         self,
@@ -1546,7 +2026,7 @@ class RuntimeTestCase(unittest.TestCase):
         receipt = self.store.record_receipt(
             session_id="s1",
             task_id="mixed-task-b",
-            source="test",
+            source="claude-hook",
             tool_name="Edit",
             command_text="reports/factor.md",
             exit_code=0,
@@ -1578,7 +2058,7 @@ class RuntimeTestCase(unittest.TestCase):
         edit_receipt = self.store.record_receipt(
             session_id="s1",
             task_id="mixed-task-c",
-            source="test",
+            source="claude-hook",
             tool_name="Edit",
             command_text="reports/factor.md",
             exit_code=0,
@@ -1587,7 +2067,7 @@ class RuntimeTestCase(unittest.TestCase):
         run_receipt = self.make_bash_receipt(
             "s1", "mixed-task-c", "python -m backtest run_factor"
         )
-        approved = self.server.completion_gate(
+        approved = self.completion_gate_after_turn(
             session_id="s1",
             task_id="mixed-task-c",
             criterion_receipt_map=[
@@ -1740,13 +2220,13 @@ class RuntimeTestCase(unittest.TestCase):
         receipt = self.store.record_receipt(
             session_id="s1",
             task_id="cn-summary-task",
-            source="test",
+            source="claude-hook",
             tool_name="Edit",
             command_text="novel/final.md",
             exit_code=0,
             metadata={"file_path": "novel/final.md"},
         )
-        approved = self.server.completion_gate(
+        approved = self.completion_gate_after_turn(
             session_id="s1",
             task_id="cn-summary-task",
             criterion_receipt_map=[
@@ -1761,13 +2241,13 @@ class RuntimeTestCase(unittest.TestCase):
         receipt = self.store.record_receipt(
             session_id="s1",
             task_id="cn-short-completion-task",
-            source="test",
+            source="claude-hook",
             tool_name="Edit",
             command_text="novel/final.md",
             exit_code=0,
             metadata={"file_path": "novel/final.md"},
         )
-        approved = self.server.completion_gate(
+        approved = self.completion_gate_after_turn(
             session_id="s1",
             task_id="cn-short-completion-task",
             criterion_receipt_map=[
@@ -1827,7 +2307,7 @@ class RuntimeTestCase(unittest.TestCase):
         receipt = self.store.record_receipt(
             session_id="s1",
             task_id="cn-completion-assertion-task",
-            source="test",
+            source="claude-hook",
             tool_name="Edit",
             command_text="novel/final.md",
             exit_code=0,
@@ -1847,7 +2327,7 @@ class RuntimeTestCase(unittest.TestCase):
     def test_completion_gate_allows_quoted_english_assertion_phrase_in_summary(self) -> None:
         self.server.mission_lock("s1", "quoted-completion-task", "goal", ["tests pass"])
         receipt = self.make_bash_receipt("s1", "quoted-completion-task", "pytest -q")
-        approved = self.server.completion_gate(
+        approved = self.completion_gate_after_turn(
             session_id="s1",
             task_id="quoted-completion-task",
             criterion_receipt_map=[
@@ -1862,13 +2342,13 @@ class RuntimeTestCase(unittest.TestCase):
         receipt = self.store.record_receipt(
             session_id="s1",
             task_id="quoted-cn-completion-task",
-            source="test",
+            source="claude-hook",
             tool_name="Edit",
             command_text="novel/final.md",
             exit_code=0,
             metadata={"file_path": "novel/final.md"},
         )
-        approved = self.server.completion_gate(
+        approved = self.completion_gate_after_turn(
             session_id="s1",
             task_id="quoted-cn-completion-task",
             criterion_receipt_map=[
@@ -1935,7 +2415,7 @@ class RuntimeTestCase(unittest.TestCase):
         receipt = self.store.record_receipt(
             session_id="s1",
             task_id="self-quoted-cn-completion-task",
-            source="test",
+            source="claude-hook",
             tool_name="Edit",
             command_text="novel/final.md",
             exit_code=0,
@@ -1974,7 +2454,7 @@ class RuntimeTestCase(unittest.TestCase):
                     exit_code=0,
                     metadata={},
                 )
-                approved = self.server.completion_gate(
+                approved = self.completion_gate_after_turn(
                     session_id="s1",
                     task_id=task_id,
                     criterion_receipt_map=[
@@ -2005,7 +2485,7 @@ class RuntimeTestCase(unittest.TestCase):
                     exit_code=0,
                     metadata={},
                 )
-                approved = self.server.completion_gate(
+                approved = self.completion_gate_after_turn(
                     session_id="s1",
                     task_id=task_id,
                     criterion_receipt_map=[
@@ -2037,6 +2517,182 @@ class RuntimeTestCase(unittest.TestCase):
         self.assertIn("REJECTED", rejected)
         self.assertIn("semantic", rejected.lower())
 
+    def test_completion_gate_requires_evidence_for_row41_action_criteria(self) -> None:
+        cases = [
+            ("row41-refactor", "refactor parser module"),
+            ("row41-deploy", "deploy staging release"),
+            ("row41-migrate", "migrate sqlite schema"),
+            ("row41-improve", "improve validation report"),
+            ("row41-validate", "validate build artifacts"),
+        ]
+        for task_id, criterion in cases:
+            with self.subTest(criterion=criterion):
+                self.server.mission_lock("s1", task_id, "goal", [criterion])
+                receipt = self.store.record_receipt(
+                    session_id="s1",
+                    task_id=task_id,
+                    source="test",
+                    tool_name="Read",
+                    command_text="notes.md",
+                    exit_code=0,
+                    metadata={},
+                )
+                rejected = self.server.completion_gate(
+                    session_id="s1",
+                    task_id=task_id,
+                    criterion_receipt_map=[
+                        {"criterion": criterion, "receipt_ids": [receipt.receipt_id]}
+                    ],
+                    completion_summary="Mapped a row forty one action criterion to read-only evidence for audit.",
+                )
+                self.assertIn("REJECTED", rejected)
+                self.assertIn("semantic", rejected.lower())
+
+    def test_completion_gate_accepts_validate_criterion_with_execution_receipt(self) -> None:
+        self.server.mission_lock(
+            "s1", "row41-validate-exec", "goal", ["validate build artifacts"]
+        )
+        receipt = self.make_bash_receipt(
+            "s1", "row41-validate-exec", "python -m validate_build"
+        )
+
+        approved = self.completion_gate_after_turn(
+            session_id="s1",
+            task_id="row41-validate-exec",
+            criterion_receipt_map=[
+                {"criterion": "validate build artifacts", "receipt_ids": [receipt.receipt_id]}
+            ],
+            completion_summary="Mapped the validation criterion to a concrete execution receipt.",
+        )
+
+        self.assertIn("APPROVED", approved)
+
+    def test_completion_gate_accepts_multilingual_validate_criteria_with_execution_receipt(self) -> None:
+        cases = [
+            ("row41-validate-en", "validate release evidence"),
+            ("row41-validate-zh", "验证发布证据"),
+            ("row41-validate-de", "Release-Nachweise validieren"),
+            ("row41-validate-fr", "valider les preuves de publication"),
+            ("row41-validate-es", "validar evidencias de publicacion"),
+            ("row41-validate-pt", "validar evidencias de publicacao"),
+            ("row41-validate-ja", "公開証拠を検証"),
+            ("row41-validate-ko", "공개 증거를 검증"),
+        ]
+        for task_id, criterion in cases:
+            with self.subTest(criterion=criterion):
+                self.server.mission_lock("s1", task_id, "goal", [criterion])
+                receipt = self.make_bash_receipt("s1", task_id, "python -m validate_build")
+
+                approved = self.completion_gate_after_turn(
+                    session_id="s1",
+                    task_id=task_id,
+                    criterion_receipt_map=[
+                        {"criterion": criterion, "receipt_ids": [receipt.receipt_id]}
+                    ],
+                    completion_summary="Mapped a multilingual validation criterion to execution evidence.",
+                )
+
+                self.assertIn("APPROVED", approved)
+
+    def test_completion_gate_rejects_read_only_receipts_for_multilingual_validate_criteria(self) -> None:
+        cases = [
+            ("row41-validate-read-en", "validate release evidence"),
+            ("row41-validate-read-zh", "验证发布证据"),
+            ("row41-validate-read-de", "Release-Nachweise validieren"),
+            ("row41-validate-read-fr", "valider les preuves de publication"),
+            ("row41-validate-read-es", "validar evidencias de publicacion"),
+            ("row41-validate-read-pt", "validar evidencias de publicacao"),
+            ("row41-validate-read-ja", "公開証拠を検証"),
+            ("row41-validate-read-ko", "공개 증거를 검증"),
+        ]
+        for task_id, criterion in cases:
+            with self.subTest(criterion=criterion):
+                self.server.mission_lock("s1", task_id, "goal", [criterion])
+                receipt = self.store.record_receipt(
+                    session_id="s1",
+                    task_id=task_id,
+                    source="test",
+                    tool_name="Read",
+                    command_text="notes.md",
+                    exit_code=0,
+                    metadata={},
+                )
+
+                rejected = self.server.completion_gate(
+                    session_id="s1",
+                    task_id=task_id,
+                    criterion_receipt_map=[
+                        {"criterion": criterion, "receipt_ids": [receipt.receipt_id]}
+                    ],
+                    completion_summary="Mapped a multilingual validation criterion to read-only evidence for audit.",
+                )
+
+                self.assertIn("REJECTED", rejected)
+                self.assertIn("semantic", rejected.lower())
+    def test_completion_gate_accepts_mutation_plus_execution_for_row41_delivery_actions(self) -> None:
+        cases = [
+            ("row41-refactor-both", "refactor parser module", "src/parser.py"),
+            ("row41-deploy-both", "deploy staging release", "deploy/staging.yml"),
+            ("row41-migrate-both", "migrate sqlite schema", "migrations/001.sql"),
+            ("row41-improve-both", "improve validation report", "reports/validation.md"),
+        ]
+        for task_id, criterion, path in cases:
+            with self.subTest(criterion=criterion):
+                self.server.mission_lock("s1", task_id, "goal", [criterion])
+                edit_receipt = self.store.record_receipt(
+                    session_id="s1",
+                    task_id=task_id,
+                    source="claude-hook",
+                    tool_name="Edit",
+                    command_text=path,
+                    exit_code=0,
+                    metadata={"file_path": path},
+                )
+                run_receipt = self.make_bash_receipt("s1", task_id, "python -m verify_delivery")
+
+                approved = self.completion_gate_after_turn(
+                    session_id="s1",
+                    task_id=task_id,
+                    criterion_receipt_map=[
+                        {
+                            "criterion": criterion,
+                            "receipt_ids": [edit_receipt.receipt_id, run_receipt.receipt_id],
+                        }
+                    ],
+                    completion_summary="Mapped the delivery criterion to mutation and execution receipts.",
+                )
+
+                self.assertIn("APPROVED", approved)
+
+    def test_completion_gate_allows_row41_observational_and_negated_action_boundaries(self) -> None:
+        cases = [
+            ("row41-deployment-plan", "review deployment plan"),
+            ("row41-migration-strategy", "analyze migration strategy"),
+            ("row41-negated-deploy", "do not deploy release artifacts"),
+            ("row41-negated-refactor", "avoid refactoring parser internals"),
+        ]
+        for task_id, criterion in cases:
+            with self.subTest(criterion=criterion):
+                self.server.mission_lock("s1", task_id, "goal", [criterion])
+                receipt = self.store.record_receipt(
+                    session_id="s1",
+                    task_id=task_id,
+                    source="test",
+                    tool_name="Read",
+                    command_text="notes.md",
+                    exit_code=0,
+                    metadata={},
+                )
+                approved = self.completion_gate_after_turn(
+                    session_id="s1",
+                    task_id=task_id,
+                    criterion_receipt_map=[
+                        {"criterion": criterion, "receipt_ids": [receipt.receipt_id]}
+                    ],
+                    completion_summary="Mapped an observational or negated action boundary to read evidence.",
+                )
+                self.assertIn("APPROVED", approved)
+
     def test_secret_creation_fails_closed_when_windows_permissions_remain_broad(self) -> None:
         import agent_runway_runtime.store as store_module
 
@@ -2044,6 +2700,7 @@ class RuntimeTestCase(unittest.TestCase):
         os.environ["ILH_SECRET_PATH"] = str(warning_secret)
         original_run = store_module.subprocess.run
         original_platform = store_module.sys.platform
+        original_harness_secret = os.environ.pop("ILH_HARNESS_SECRET", None)
         calls: list[list[str]] = []
 
         def fake_run(cmd, **kwargs):
@@ -2064,8 +2721,48 @@ class RuntimeTestCase(unittest.TestCase):
         finally:
             store_module.subprocess.run = original_run
             store_module.sys.platform = original_platform
+            if original_harness_secret is not None:
+                os.environ["ILH_HARNESS_SECRET"] = original_harness_secret
+            else:
+                os.environ.pop("ILH_HARNESS_SECRET", None)
         self.assertTrue(any(cmd and cmd[0].lower() == "icacls" for cmd in calls))
         self.assertFalse(warning_secret.exists())
+
+    def test_runtime_store_rejects_invalid_existing_secret_file(self) -> None:
+        import agent_runway_runtime.store as store_module
+
+        original_harness_secret = os.environ.pop("ILH_HARNESS_SECRET", None)
+        cases = ["short-secret", "A" * 64, "g" * 64]
+        try:
+            for index, secret in enumerate(cases):
+                with self.subTest(secret=secret):
+                    bad_secret = Path(self.temp_dir.name) / f"bad-secret-{index}.key"
+                    bad_secret.write_text(secret + "\n", encoding="utf-8")
+                    os.environ["ILH_SECRET_PATH"] = str(bad_secret)
+
+                    with self.assertRaisesRegex(ValueError, "secret.key must contain 64 lowercase hex characters"):
+                        store_module.RuntimeStore(db_path=str(Path(self.temp_dir.name) / f"bad-secret-state-{index}.db"))
+        finally:
+            if original_harness_secret is not None:
+                os.environ["ILH_HARNESS_SECRET"] = original_harness_secret
+            else:
+                os.environ.pop("ILH_HARNESS_SECRET", None)
+
+    def test_tighten_windows_file_acl_returns_false_on_subprocess_oserror(self) -> None:
+        import agent_runway_runtime.store as store_module
+
+        original_run = store_module.subprocess.run
+
+        def fake_run(_cmd, **_kwargs):
+            raise OSError("icacls missing")
+
+        store_module.subprocess.run = fake_run
+        try:
+            result = store_module.tighten_windows_file_acl(Path(self.temp_dir.name) / "secret.key")
+        finally:
+            store_module.subprocess.run = original_run
+
+        self.assertFalse(result)
 
     def test_duplicate_receipt_id_does_not_replace_existing_receipt_row(self) -> None:
         self.server.mission_lock("s1", "ledger-task", "goal", ["criterion"])

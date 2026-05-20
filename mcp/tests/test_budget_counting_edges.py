@@ -99,6 +99,7 @@ class BudgetCountingEdgesTestCase(unittest.TestCase):
             ["criterion"],
             adversarial_audit_required=True,
             adversarial_audit_profiles=["runtime_gate_adversary"],
+            adversarial_audit_claims=["claim-1"],
             adversarial_audit_budget=self.audit_budget(),
             adversarial_audit_records=[self.audit_plan(), attempt, dict(attempt)],
         )

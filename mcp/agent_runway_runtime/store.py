@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import sqlite3
 import subprocess
@@ -13,6 +14,16 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
+
+SUBAGENT_TERMINAL_STATUSES = frozenset({"completed", "failed", "abandoned", "rejected"})
+SECRET_KEY_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+
+class _UnsetTaskId:
+    pass
+
+
+_TASK_ID_UNSET = _UnsetTaskId()
 
 
 def utc_now() -> str:
@@ -45,13 +56,16 @@ def tighten_windows_file_acl(path: Path) -> bool:
         ["icacls", str(path), "/grant:r", f"{current_user}:R"],
     ]
     for cmd in commands:
-        result = subprocess.run(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+            )
+        except OSError:
+            return False
         if result.returncode != 0:
             return False
     return True
@@ -142,6 +156,43 @@ class CounterexampleCheckRecord:
     created_at: str
 
 
+@dataclass(frozen=True)
+class SubagentSpanRecord:
+    child_span_id: str
+    session_id: str
+    task_id: str
+    host: str
+    subagent_type: str
+    host_child_id: str
+    context_mode: str
+    workspace_kind: str
+    status: str
+    delegated_scope: str
+    delegated_budget: dict[str, Any]
+    budget_consumed: dict[str, Any]
+    started_at: str
+    ended_at: str | None
+    transcript_ref: str
+    artifact_refs: list[str]
+    last_message: str
+    parent_receipt_seq: int
+    terminal_receipt_seq: int
+
+
+@dataclass(frozen=True)
+class SubagentHandoffRecord:
+    handoff_id: int
+    child_span_id: str
+    session_id: str
+    task_id: str
+    summary: str
+    verified_claims: list[dict[str, Any]]
+    receipt_ids: list[str]
+    risks: list[str]
+    unverified_items: list[str]
+    created_at: str
+
+
 class RuntimeStore:
     def __init__(self, db_path: str | None = None, secret: str | None = None) -> None:
         default_db = ".agent-runway/state.db"
@@ -165,14 +216,14 @@ class RuntimeStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
             try:
-                return path.read_text(encoding="utf-8").strip()
+                return self._read_secret_file(path)
             except FileNotFoundError:
                 pass
         value = secrets.token_hex(32)
         try:
             fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         except FileExistsError:
-            return path.read_text(encoding="utf-8").strip()
+            return self._read_secret_file(path)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(value + "\n")
         try:
@@ -186,6 +237,12 @@ class RuntimeStore:
                 raise PermissionError(
                     f"Windows secret ACL could not be tightened for {path}; refusing to continue."
                 )
+        return value
+
+    def _read_secret_file(self, path: Path) -> str:
+        value = path.read_text(encoding="utf-8").strip()
+        if not SECRET_KEY_PATTERN.fullmatch(value):
+            raise ValueError(f"{path} secret.key must contain 64 lowercase hex characters.")
         return value
 
     def _connect(self) -> sqlite3.Connection:
@@ -236,6 +293,19 @@ class RuntimeStore:
                     PRIMARY KEY(session_id, task_id),
                     FOREIGN KEY(session_id) REFERENCES sessions(session_id)
                 );
+
+                CREATE TABLE IF NOT EXISTS host_session_bindings (
+                    host_session_id TEXT PRIMARY KEY,
+                    mission_session_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(host_session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(mission_session_id, task_id) REFERENCES missions(session_id, task_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_host_session_bindings_mission
+                    ON host_session_bindings(mission_session_id, task_id);
 
                 CREATE TABLE IF NOT EXISTS receipts (
                     receipt_id TEXT PRIMARY KEY,
@@ -314,6 +384,51 @@ class RuntimeStore:
                     FOREIGN KEY(session_id, task_id) REFERENCES missions(session_id, task_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_counterexample_checks_lookup ON counterexample_checks(session_id, task_id, created_at);
+
+                CREATE TABLE IF NOT EXISTS subagent_spans (
+                    child_span_id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    host TEXT NOT NULL,
+                    subagent_type TEXT NOT NULL,
+                    host_child_id TEXT NOT NULL,
+                    context_mode TEXT NOT NULL,
+                    workspace_kind TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    delegated_scope TEXT NOT NULL,
+                    delegated_budget TEXT NOT NULL,
+                    budget_consumed TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    transcript_ref TEXT NOT NULL,
+                    artifact_refs TEXT NOT NULL,
+                    last_message TEXT NOT NULL,
+                    parent_receipt_seq INTEGER NOT NULL,
+                    terminal_receipt_seq INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(session_id, task_id) REFERENCES missions(session_id, task_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_subagent_spans_lookup ON subagent_spans(session_id, task_id, started_at);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_subagent_spans_host_child_unique
+                    ON subagent_spans(session_id, task_id, host, host_child_id)
+                    WHERE host_child_id<>'';
+
+                CREATE TABLE IF NOT EXISTS subagent_handoffs (
+                    handoff_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    child_span_id TEXT NOT NULL,
+                    session_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    verified_claims TEXT NOT NULL,
+                    receipt_ids TEXT NOT NULL,
+                    risks TEXT NOT NULL,
+                    unverified_items TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(child_span_id) REFERENCES subagent_spans(child_span_id),
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(session_id, task_id) REFERENCES missions(session_id, task_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_subagent_handoffs_lookup ON subagent_handoffs(session_id, task_id, child_span_id, created_at);
                 """
             )
 
@@ -323,6 +438,8 @@ class RuntimeStore:
         ).fetchone()
         if row is None:
             return
+
+        self._migrate_subagent_terminal_receipt_seq(conn)
 
         pk_rows = conn.execute("PRAGMA table_info(missions)").fetchall()
         pk_columns = [entry["name"] for entry in pk_rows if entry["pk"]]
@@ -455,6 +572,38 @@ class RuntimeStore:
         )
         conn.execute("PRAGMA foreign_keys=ON")
 
+    def _migrate_subagent_terminal_receipt_seq(self, conn: sqlite3.Connection) -> None:
+        if not self._table_exists(conn, "subagent_spans"):
+            return
+        columns = {entry["name"] for entry in conn.execute("PRAGMA table_info(subagent_spans)")}
+        if "terminal_receipt_seq" in columns:
+            return
+
+        conn.execute(
+            "ALTER TABLE subagent_spans ADD COLUMN terminal_receipt_seq INTEGER NOT NULL DEFAULT 0"
+        )
+        if not self._table_exists(conn, "receipts"):
+            return
+        conn.execute(
+            """
+            UPDATE subagent_spans
+            SET terminal_receipt_seq=COALESCE((
+                SELECT MAX(receipts.seq)
+                FROM receipts
+                WHERE receipts.session_id=subagent_spans.session_id
+                  AND receipts.created_at<=subagent_spans.ended_at
+            ), 0)
+            WHERE ended_at IS NOT NULL
+            """
+        )
+
+    def _table_exists(self, conn: sqlite3.Connection, table_name: str) -> bool:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+        return row is not None
+
     def ensure_session(
         self, session_id: str, host: str = "unknown", cwd: str = "."
     ) -> None:
@@ -482,6 +631,45 @@ class RuntimeStore:
                 (session_id, host, cwd, now, now),
             )
 
+    def bind_host_session_to_mission(
+        self, host_session_id: str, mission: MissionRecord, source: str = ""
+    ) -> None:
+        now = utc_now()
+        self.ensure_session(host_session_id)
+        with closing(self._connect()) as conn, conn:
+            conn.execute(
+                """
+                INSERT INTO host_session_bindings(host_session_id, mission_session_id, task_id, source, created_at, updated_at)
+                VALUES(?, ?, ?, ?, ?, ?)
+                ON CONFLICT(host_session_id) DO UPDATE SET
+                    mission_session_id=excluded.mission_session_id,
+                    task_id=excluded.task_id,
+                    source=excluded.source,
+                    updated_at=excluded.updated_at
+                """,
+                (host_session_id, mission.session_id, mission.task_id, source, now, now),
+            )
+
+    def bound_active_mission_for_host_session(
+        self, host_session_id: str
+    ) -> MissionRecord | None:
+        with closing(self._connect()) as conn, conn:
+            row = conn.execute(
+                """
+                SELECT missions.*
+                FROM host_session_bindings
+                JOIN missions
+                  ON missions.session_id=host_session_bindings.mission_session_id
+                 AND missions.task_id=host_session_bindings.task_id
+                WHERE host_session_bindings.host_session_id=?
+                  AND missions.status='active'
+                ORDER BY host_session_bindings.updated_at DESC
+                LIMIT 1
+                """,
+                (host_session_id,),
+            ).fetchone()
+        return self._row_to_mission(row) if row else None
+
     def create_mission(
         self,
         session_id: str,
@@ -496,51 +684,33 @@ class RuntimeStore:
     ) -> MissionRecord:
         now = utc_now()
         self.ensure_session(session_id)
-        notes_with_epoch = dict(notes or {})
         with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            active = conn.execute(
+                "SELECT 1 FROM missions WHERE session_id=? AND task_id=? AND status='active' LIMIT 1",
+                (session_id, task_id),
+            ).fetchone()
+            if active is not None:
+                raise ValueError("mission_lock does not allow relocking an active mission")
+            existing = conn.execute(
+                "SELECT status FROM missions WHERE session_id=? AND task_id=? LIMIT 1",
+                (session_id, task_id),
+            ).fetchone()
+            if existing is not None:
+                raise ValueError(
+                    "mission_lock does not allow reusing an existing mission task_id"
+                )
             row = conn.execute(
                 "SELECT COALESCE(MAX(seq), 0) AS seq FROM receipts WHERE session_id=?",
                 (session_id,),
             ).fetchone()
+            notes_with_epoch = dict(notes or {})
             notes_with_epoch["mission_start_receipt_seq"] = int(row["seq"] if row else 0)
-            conn.execute(
-                "UPDATE missions SET status='superseded', updated_at=? WHERE session_id=? AND status='active' AND task_id<>?",
-                (now, session_id, task_id),
-            )
-            conn.execute(
-                "DELETE FROM stuck_attempts WHERE session_id=? AND task_id=?",
-                (session_id, task_id),
-            )
-            conn.execute(
-                "DELETE FROM approvals WHERE session_id=? AND task_id=?",
-                (session_id, task_id),
-            )
-            conn.execute(
-                "DELETE FROM decision_records WHERE session_id=? AND task_id=?",
-                (session_id, task_id),
-            )
-            conn.execute(
-                "DELETE FROM counterexample_checks WHERE session_id=? AND task_id=?",
-                (session_id, task_id),
-            )
             conn.execute(
                 """
                 INSERT INTO missions(session_id, task_id, goal, scope_boundary, completion_criteria, red_lines, status,
                                      slice_count, retry_budget, slice_budget, created_at, updated_at, completed_at, notes)
                 VALUES(?, ?, ?, ?, ?, ?, 'active', 0, ?, ?, ?, ?, NULL, ?)
-                ON CONFLICT(session_id, task_id) DO UPDATE SET
-                    goal=excluded.goal,
-                    scope_boundary=excluded.scope_boundary,
-                    completion_criteria=excluded.completion_criteria,
-                    red_lines=excluded.red_lines,
-                    status='active',
-                    slice_count=0,
-                    retry_budget=excluded.retry_budget,
-                    slice_budget=excluded.slice_budget,
-                    created_at=excluded.created_at,
-                    updated_at=excluded.updated_at,
-                    notes=excluded.notes,
-                    completed_at=NULL
                 """,
                 (
                     session_id,
@@ -558,6 +728,23 @@ class RuntimeStore:
             )
         return self.get_mission(session_id, task_id)
 
+    def _delete_transient_approvals(
+        self, conn: sqlite3.Connection, session_id: str, task_id: str
+    ) -> None:
+        rows = conn.execute(
+            "SELECT token, meta FROM approvals WHERE session_id=? AND task_id=?",
+            (session_id, task_id),
+        ).fetchall()
+        tokens = [row["token"] for row in rows if not self._is_standing_boundary(row["meta"])]
+        conn.executemany("DELETE FROM approvals WHERE token=?", [(token,) for token in tokens])
+
+    def _is_standing_boundary(self, meta_text: str) -> bool:
+        try:
+            meta = json.loads(meta_text)
+        except json.JSONDecodeError:
+            return False
+        return meta.get("authorization_kind") == "standing_boundary"
+
     def get_mission(self, session_id: str, task_id: str) -> MissionRecord:
         with closing(self._connect()) as conn, conn:
             row = conn.execute(
@@ -574,14 +761,31 @@ class RuntimeStore:
         self, session_id: str, task_id: str | None = None
     ) -> MissionRecord | None:
         query = "SELECT * FROM missions WHERE session_id=? AND status='active'"
-        params: list[Any] = [session_id]
+        params = self._session_mission_params(session_id, task_id)
         if task_id:
             query += " AND task_id=?"
-            params.append(task_id)
         query += " ORDER BY updated_at DESC LIMIT 1"
         with closing(self._connect()) as conn, conn:
             row = conn.execute(query, params).fetchone()
         return self._row_to_mission(row) if row else None
+
+    def list_active_missions(
+        self, session_id: str, task_id: str | None = None
+    ) -> list[MissionRecord]:
+        query = "SELECT * FROM missions WHERE session_id=? AND status='active'"
+        params = self._session_mission_params(session_id, task_id)
+        if task_id:
+            query += " AND task_id=?"
+        query += " ORDER BY updated_at DESC"
+        with closing(self._connect()) as conn, conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._row_to_mission(row) for row in rows]
+
+    def _session_mission_params(self, session_id: str, task_id: str | None) -> list[Any]:
+        params: list[Any] = [session_id]
+        if task_id:
+            params.append(task_id)
+        return params
 
     def get_latest_mission(self, session_id: str) -> MissionRecord | None:
         with closing(self._connect()) as conn, conn:
@@ -592,6 +796,10 @@ class RuntimeStore:
         return self._row_to_mission(row) if row else None
 
     def get_latest_active_mission_by_cwd(self, cwd: str) -> MissionRecord | None:
+        matches = self.list_active_missions_by_cwd(cwd)
+        return self._single_mission_or_none(matches)
+
+    def list_active_missions_by_cwd(self, cwd: str) -> list[MissionRecord]:
         normalized_cwd = normalize_cwd(cwd)
         with closing(self._connect()) as conn, conn:
             rows = conn.execute(
@@ -604,12 +812,12 @@ class RuntimeStore:
                 """,
             ).fetchall()
         matches = [row for row in rows if normalize_cwd(row["session_cwd"]) == normalized_cwd]
-        return self._single_mission_or_none(matches)
+        return [self._row_to_mission(row) for row in matches]
 
-    def _single_mission_or_none(self, rows: list[sqlite3.Row]) -> MissionRecord | None:
-        if len(rows) != 1:
+    def _single_mission_or_none(self, missions: list[MissionRecord]) -> MissionRecord | None:
+        if len(missions) != 1:
             return None
-        return self._row_to_mission(rows[0])
+        return missions[0]
 
     def _row_to_mission(self, row: sqlite3.Row) -> MissionRecord:
         return MissionRecord(
@@ -634,9 +842,39 @@ class RuntimeStore:
     ) -> MissionRecord:
         now = utc_now()
         with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT status, notes FROM missions WHERE session_id=? AND task_id=?",
+                (session_id, task_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError(
+                    f"Unknown mission: session_id={session_id!r}, task_id={task_id!r}"
+                )
+            if row["status"] != "active":
+                raise ValueError(
+                    f"Cannot complete mission with status {row['status']!r}; expected 'active'."
+                )
+            if notes is None:
+                conn.execute(
+                    "UPDATE missions SET status='completed', completed_at=?, updated_at=? WHERE session_id=? AND task_id=?",
+                    (now, now, session_id, task_id),
+                )
+            else:
+                existing_notes = json.loads(row["notes"])
+                merged_notes = {**existing_notes, **notes}
+                conn.execute(
+                    "UPDATE missions SET status='completed', completed_at=?, updated_at=?, notes=? WHERE session_id=? AND task_id=?",
+                    (now, now, canonical_json(merged_notes), session_id, task_id),
+                )
+        return self.get_mission(session_id, task_id)
+
+    def update_mission_notes(self, session_id: str, task_id: str, notes: dict[str, Any]) -> MissionRecord:
+        now = utc_now()
+        with closing(self._connect()) as conn, conn:
             conn.execute(
-                "UPDATE missions SET status='completed', completed_at=?, updated_at=?, notes=? WHERE session_id=? AND task_id=?",
-                (now, now, canonical_json(notes or {}), session_id, task_id),
+                "UPDATE missions SET notes=?, updated_at=? WHERE session_id=? AND task_id=?",
+                (canonical_json(notes), now, session_id, task_id),
             )
         return self.get_mission(session_id, task_id)
 
@@ -704,6 +942,16 @@ class RuntimeStore:
             )
             for row in rows
         ]
+
+    def latest_stuck_attempt_id(self, session_id: str, task_id: str) -> int:
+        with closing(self._connect()) as conn, conn:
+            row = conn.execute(
+                "SELECT MAX(attempt_id) AS latest_id FROM stuck_attempts WHERE session_id=? AND task_id=?",
+                (session_id, task_id),
+            ).fetchone()
+        if not row or row["latest_id"] is None:
+            return 0
+        return int(row["latest_id"])
 
     def record_decision_record(
         self,
@@ -839,6 +1087,218 @@ class RuntimeStore:
             for row in rows
         ]
 
+    def create_subagent_span(
+        self,
+        session_id: str,
+        task_id: str,
+        values: dict[str, Any],
+    ) -> SubagentSpanRecord:
+        now = utc_now()
+        child_span_id = f"child_{secrets.token_urlsafe(12)}"
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            host_child_id = values["host_child_id"]
+            if host_child_id:
+                existing = conn.execute(
+                    """
+                    SELECT child_span_id FROM subagent_spans
+                    WHERE session_id=? AND task_id=? AND host=? AND host_child_id=?
+                    LIMIT 1
+                    """,
+                    (session_id, task_id, values["host"], host_child_id),
+                ).fetchone()
+                if existing is not None:
+                    raise ValueError(
+                        f"host_child_id {host_child_id!r} is already registered for this mission and host."
+                    )
+            row = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) AS seq FROM receipts WHERE session_id=?",
+                (session_id,),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO subagent_spans(child_span_id, session_id, task_id, host, subagent_type,
+                                           host_child_id, context_mode, workspace_kind, status,
+                                           delegated_scope, delegated_budget, budget_consumed,
+                                           started_at, ended_at, transcript_ref, artifact_refs,
+                    last_message, parent_receipt_seq, terminal_receipt_seq)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, NULL, '', ?, '', ?, 0)
+                """,
+                (
+                    child_span_id,
+                    session_id,
+                    task_id,
+                    values["host"],
+                    values["subagent_type"],
+                    host_child_id,
+                    values["context_mode"],
+                    values["workspace_kind"],
+                    values["delegated_scope"],
+                    canonical_json(values["delegated_budget"]),
+                    canonical_json({}),
+                    now,
+                    canonical_json([]),
+                    int(row["seq"] if row else 0),
+                ),
+            )
+        return self.get_subagent_span(session_id, task_id, child_span_id)
+
+    def get_subagent_span(
+        self, session_id: str, task_id: str, child_span_id: str
+    ) -> SubagentSpanRecord:
+        with closing(self._connect()) as conn, conn:
+            row = conn.execute(
+                "SELECT * FROM subagent_spans WHERE session_id=? AND task_id=? AND child_span_id=?",
+                (session_id, task_id, child_span_id),
+            ).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown child_span_id: {child_span_id!r}")
+        return self._row_to_subagent_span(row)
+
+    def list_subagent_spans(
+        self, session_id: str, task_id: str
+    ) -> list[SubagentSpanRecord]:
+        with closing(self._connect()) as conn, conn:
+            rows = conn.execute(
+                "SELECT * FROM subagent_spans WHERE session_id=? AND task_id=? ORDER BY started_at ASC",
+                (session_id, task_id),
+            ).fetchall()
+        return [self._row_to_subagent_span(row) for row in rows]
+
+    def stop_subagent_span(
+        self,
+        session_id: str,
+        task_id: str,
+        child_span_id: str,
+        values: dict[str, Any],
+    ) -> SubagentSpanRecord:
+        now = utc_now()
+        with closing(self._connect()) as conn, conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT status FROM subagent_spans WHERE session_id=? AND task_id=? AND child_span_id=?",
+                (session_id, task_id, child_span_id),
+            ).fetchone()
+            if existing is None:
+                raise KeyError(f"Unknown child_span_id: {child_span_id!r}")
+            if existing["status"] in SUBAGENT_TERMINAL_STATUSES:
+                raise ValueError(
+                    f"child_span_id {child_span_id!r} is already terminal with status {existing['status']!r}."
+                )
+            conn.execute(
+                """
+                UPDATE subagent_spans
+                SET status=?, budget_consumed=?, ended_at=?, transcript_ref=?, artifact_refs=?, last_message=?,
+                    terminal_receipt_seq=(SELECT COALESCE(MAX(seq), 0) FROM receipts WHERE session_id=?)
+                WHERE session_id=? AND task_id=? AND child_span_id=?
+                """,
+                (
+                    values["status"],
+                    canonical_json(values["budget_consumed"]),
+                    now,
+                    values["transcript_ref"],
+                    canonical_json(values["artifact_refs"]),
+                    values["last_message"],
+                    session_id,
+                    session_id,
+                    task_id,
+                    child_span_id,
+                ),
+            )
+        return self.get_subagent_span(session_id, task_id, child_span_id)
+
+    def record_subagent_handoff(
+        self,
+        child_span_id: str,
+        session_id: str,
+        task_id: str,
+        values: dict[str, Any],
+    ) -> SubagentHandoffRecord:
+        now = utc_now()
+        with closing(self._connect()) as conn, conn:
+            cur = conn.execute(
+                """
+                INSERT INTO subagent_handoffs(child_span_id, session_id, task_id, summary,
+                                              verified_claims, receipt_ids, risks,
+                                              unverified_items, created_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    child_span_id,
+                    session_id,
+                    task_id,
+                    values["summary"],
+                    canonical_json(values["verified_claims"]),
+                    canonical_json(values["receipt_ids"]),
+                    canonical_json(values["risks"]),
+                    canonical_json(values["unverified_items"]),
+                    now,
+                ),
+            )
+            handoff_id = int(cur.lastrowid)
+        return SubagentHandoffRecord(
+            handoff_id=handoff_id,
+            child_span_id=child_span_id,
+            session_id=session_id,
+            task_id=task_id,
+            summary=values["summary"],
+            verified_claims=values["verified_claims"],
+            receipt_ids=values["receipt_ids"],
+            risks=values["risks"],
+            unverified_items=values["unverified_items"],
+            created_at=now,
+        )
+
+    def list_subagent_handoffs(
+        self, session_id: str, task_id: str, child_span_id: str | None = None
+    ) -> list[SubagentHandoffRecord]:
+        query = "SELECT * FROM subagent_handoffs WHERE session_id=? AND task_id=?"
+        params: list[Any] = [session_id, task_id]
+        if child_span_id:
+            query += " AND child_span_id=?"
+            params.append(child_span_id)
+        query += " ORDER BY created_at ASC"
+        with closing(self._connect()) as conn, conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._row_to_subagent_handoff(row) for row in rows]
+
+    def _row_to_subagent_span(self, row: sqlite3.Row) -> SubagentSpanRecord:
+        return SubagentSpanRecord(
+            child_span_id=row["child_span_id"],
+            session_id=row["session_id"],
+            task_id=row["task_id"],
+            host=row["host"],
+            subagent_type=row["subagent_type"],
+            host_child_id=row["host_child_id"],
+            context_mode=row["context_mode"],
+            workspace_kind=row["workspace_kind"],
+            status=row["status"],
+            delegated_scope=row["delegated_scope"],
+            delegated_budget=json.loads(row["delegated_budget"]),
+            budget_consumed=json.loads(row["budget_consumed"]),
+            started_at=row["started_at"],
+            ended_at=row["ended_at"],
+            transcript_ref=row["transcript_ref"],
+            artifact_refs=json.loads(row["artifact_refs"]),
+            last_message=row["last_message"],
+            parent_receipt_seq=int(row["parent_receipt_seq"]),
+            terminal_receipt_seq=int(row["terminal_receipt_seq"]),
+        )
+
+    def _row_to_subagent_handoff(self, row: sqlite3.Row) -> SubagentHandoffRecord:
+        return SubagentHandoffRecord(
+            handoff_id=int(row["handoff_id"]),
+            child_span_id=row["child_span_id"],
+            session_id=row["session_id"],
+            task_id=row["task_id"],
+            summary=row["summary"],
+            verified_claims=json.loads(row["verified_claims"]),
+            receipt_ids=json.loads(row["receipt_ids"]),
+            risks=json.loads(row["risks"]),
+            unverified_items=json.loads(row["unverified_items"]),
+            created_at=row["created_at"],
+        )
+
     def sign_receipt_payload(self, payload: dict[str, Any]) -> tuple[str, str]:
         message = canonical_json(payload).encode("utf-8")
         digest = hmac.new(
@@ -864,6 +1324,21 @@ class RuntimeStore:
         return (
             hmac.compare_digest(expected_id, receipt.receipt_id)
             and hmac.compare_digest(expected_signature, receipt.signature)
+        )
+
+    def _receipt_from_row(self, row: sqlite3.Row) -> ReceiptRecord:
+        return ReceiptRecord(
+            receipt_id=row["receipt_id"],
+            session_id=row["session_id"],
+            task_id=row["task_id"],
+            source=row["source"],
+            tool_name=row["tool_name"],
+            command_text=row["command_text"],
+            exit_code=row["exit_code"],
+            metadata=json.loads(row["metadata"]),
+            created_at=row["created_at"],
+            seq=int(row["seq"]),
+            signature=row["signature"],
         )
 
     def record_receipt(
@@ -896,7 +1371,9 @@ class RuntimeStore:
         computed_receipt_id, computed_signature = self.sign_receipt_payload(payload)
         receipt_id = receipt_id or computed_receipt_id
         signature = signature or computed_signature
-        if signature != computed_signature or receipt_id != computed_receipt_id:
+        if not hmac.compare_digest(
+            signature, computed_signature
+        ) or not hmac.compare_digest(receipt_id, computed_receipt_id):
             raise ValueError("Receipt signature mismatch")
         self.ensure_session(session_id)
         with closing(self._connect()) as conn:
@@ -907,7 +1384,7 @@ class RuntimeStore:
             ).fetchone()
             seq = int(row["next_seq"])
             existing = conn.execute(
-                "SELECT seq FROM receipts WHERE receipt_id=?",
+                "SELECT * FROM receipts WHERE receipt_id=?",
                 (receipt_id,),
             ).fetchone()
             if existing is None:
@@ -931,28 +1408,33 @@ class RuntimeStore:
                         signature,
                     ),
                 )
+                receipt = ReceiptRecord(
+                    receipt_id,
+                    session_id,
+                    task_id,
+                    source,
+                    tool_name,
+                    command_text,
+                    exit_code,
+                    metadata,
+                    created_at,
+                    seq,
+                    signature,
+                )
             else:
-                seq = int(existing["seq"])
+                receipt = self._receipt_from_row(existing)
+                if not hmac.compare_digest(
+                    receipt.signature, signature
+                ) or not self.verify_receipt(receipt):
+                    raise ValueError("Existing receipt_id row mismatch")
             conn.commit()
-        return ReceiptRecord(
-            receipt_id,
-            session_id,
-            task_id,
-            source,
-            tool_name,
-            command_text,
-            exit_code,
-            metadata,
-            created_at,
-            seq,
-            signature,
-        )
+        return receipt
 
     def get_receipts(
         self,
         receipt_ids: Iterable[str],
         session_id: str | None = None,
-        task_id: str | None = None,
+        task_id: str | None | _UnsetTaskId = _TASK_ID_UNSET,
     ) -> list[ReceiptRecord]:
         ids = list(dict.fromkeys([rid for rid in receipt_ids if rid]))
         if not ids:
@@ -963,27 +1445,14 @@ class RuntimeStore:
         if session_id:
             query += " AND session_id=?"
             params.append(session_id)
-        if task_id is not None:
-            query += " AND task_id IS ?"
+        if task_id is None:
+            query += " AND task_id IS NULL"
+        elif task_id is not _TASK_ID_UNSET:
+            query += " AND task_id=?"
             params.append(task_id)
         with closing(self._connect()) as conn, conn:
             rows = conn.execute(query, params).fetchall()
-        return [
-            ReceiptRecord(
-                receipt_id=row["receipt_id"],
-                session_id=row["session_id"],
-                task_id=row["task_id"],
-                source=row["source"],
-                tool_name=row["tool_name"],
-                command_text=row["command_text"],
-                exit_code=row["exit_code"],
-                metadata=json.loads(row["metadata"]),
-                created_at=row["created_at"],
-                seq=int(row["seq"]),
-                signature=row["signature"],
-            )
-            for row in rows
-        ]
+        return [self._receipt_from_row(row) for row in rows]
 
     def list_recent_receipts(
         self, session_id: str, task_id: str | None = None, limit: int = 10
@@ -997,22 +1466,7 @@ class RuntimeStore:
         params.append(limit)
         with closing(self._connect()) as conn, conn:
             rows = conn.execute(query, params).fetchall()
-        return [
-            ReceiptRecord(
-                receipt_id=row["receipt_id"],
-                session_id=row["session_id"],
-                task_id=row["task_id"],
-                source=row["source"],
-                tool_name=row["tool_name"],
-                command_text=row["command_text"],
-                exit_code=row["exit_code"],
-                metadata=json.loads(row["metadata"]),
-                created_at=row["created_at"],
-                seq=int(row["seq"]),
-                signature=row["signature"],
-            )
-            for row in rows
-        ]
+        return [self._receipt_from_row(row) for row in rows]
 
     def latest_receipt_seq(self, session_id: str, task_id: str | None = None) -> int:
         query = "SELECT COALESCE(MAX(seq), 0) AS seq FROM receipts WHERE session_id=?"
@@ -1023,6 +1477,36 @@ class RuntimeStore:
         with closing(self._connect()) as conn, conn:
             row = conn.execute(query, params).fetchone()
         return int(row["seq"])
+
+    def _approval_freshness_receipt_is_gate_echo(
+        self, receipt: ReceiptRecord, task_id: str, gate_type: str
+    ) -> bool:
+        if receipt.task_id != task_id:
+            return False
+        if receipt.tool_name != f"agent-runway_{gate_type}":
+            return False
+        return receipt.metadata.get("gate_type") == gate_type
+
+    def _has_freshness_relevant_receipt_after(
+        self, approval: ApprovalRecord, session_id: str, task_id: str
+    ) -> bool:
+        with closing(self._connect()) as conn, conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM receipts
+                WHERE session_id=? AND seq>?
+                ORDER BY seq ASC
+                """,
+                (session_id, approval.after_receipt_seq),
+            ).fetchall()
+        for row in rows:
+            receipt = self._receipt_from_row(row)
+            if self._approval_freshness_receipt_is_gate_echo(
+                receipt, task_id, approval.gate_type
+            ):
+                continue
+            return True
+        return False
 
     def latest_tool_seq(
         self, session_id: str, task_id: str, tool_names: Iterable[str]
@@ -1047,16 +1531,14 @@ class RuntimeStore:
         approved: bool,
         reason: str,
         after_receipt_seq: int,
-        ttl_seconds: int = 600,
+        ttl_seconds: int | None = 600,
         meta: dict[str, Any] | None = None,
     ) -> ApprovalRecord:
         created_at = utc_now()
-        expires_at = (
-            (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds))
-            .replace(microsecond=0)
-            .isoformat()
-            .replace("+00:00", "Z")
-        )
+        approval_meta = meta or {}
+        if ttl_seconds is None and approval_meta.get("authorization_kind") != "standing_boundary":
+            raise ValueError("ttl_seconds=None requires standing_boundary authorization_kind.")
+        expires_at = "never" if ttl_seconds is None else self._expiry_from_ttl(ttl_seconds)
         token = secrets.token_urlsafe(18)
         with closing(self._connect()) as conn, conn:
             conn.execute(
@@ -1075,7 +1557,7 @@ class RuntimeStore:
                     after_receipt_seq,
                     created_at,
                     expires_at,
-                    canonical_json(meta or {}),
+                    canonical_json(approval_meta),
                 ),
             )
         return ApprovalRecord(
@@ -1088,7 +1570,15 @@ class RuntimeStore:
             after_receipt_seq,
             created_at,
             expires_at,
-            meta or {},
+            approval_meta,
+        )
+
+    def _expiry_from_ttl(self, ttl_seconds: int) -> str:
+        return (
+            (datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds))
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
         )
 
     def latest_approval(
@@ -1123,24 +1613,34 @@ class RuntimeStore:
         """
         Check if an approval is still fresh (valid for use).
         
-        Design note: This uses session-level receipt freshness (latest_receipt_seq(session_id))
-        rather than task-level (latest_receipt_seq(session_id, task_id)). This is a deliberate
-        design tradeoff to support future multi-task concurrency within a session:
-        
-        - In the current single-active-task model, this is slightly more permissive than necessary
-        - In a future multi-task model, this prevents cross-task receipt pollution
-        - The tradeoff: session-level freshness means any receipt in the session invalidates
-          all approvals, even if they belong to different tasks
-        
-        This is not a bug, but a forward-looking design choice that prioritizes safety
-        (conservative invalidation) over precision in the current single-task scenario.
+        Design note: freshness is session-scoped, with one narrow exception for host
+        post-tool receipts that merely echo the same approved gate call. This keeps
+        later task activity from silently reusing stale approvals while avoiding a
+        self-invalidating Stop hook immediately after the gate tool records its own
+        post-tool receipt.
         """
         if approval is None or not approval.approved:
             return False
         latest = self.latest_approval(session_id, task_id, approval.gate_type)
         if latest is None or latest.token != approval.token:
             return False
+        if approval.meta.get("authorization_kind") == "standing_boundary":
+            return approval.expires_at == "never"
+        if approval.gate_type == "turn_end_gate":
+            try:
+                approved_stuck_attempt_id = int(
+                    approval.meta.get("latest_stuck_attempt_id") or 0
+                )
+            except (TypeError, ValueError):
+                approved_stuck_attempt_id = 0
+            if approved_stuck_attempt_id < self.latest_stuck_attempt_id(session_id, task_id):
+                return False
         expires = datetime.fromisoformat(approval.expires_at.replace("Z", "+00:00"))
         if expires < datetime.now(timezone.utc):
             return False
-        return approval.after_receipt_seq >= self.latest_receipt_seq(session_id)
+        latest_receipt_seq = self.latest_receipt_seq(session_id)
+        if approval.after_receipt_seq >= latest_receipt_seq:
+            return True
+        return not self._has_freshness_relevant_receipt_after(
+            approval, session_id, task_id
+        )

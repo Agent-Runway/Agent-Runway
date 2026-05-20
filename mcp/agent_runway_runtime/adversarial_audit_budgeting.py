@@ -5,8 +5,35 @@ from typing import Any
 
 from .adversarial_audit_common import has_timezone, nonempty_string_list, parse_aware_time, parse_time
 
+USAGE_FIELDS = (
+    "hypotheses_used",
+    "hypotheses_remaining",
+    "attacks_used",
+    "attacks_remaining",
+    "runtime_seconds_used",
+    "runtime_seconds_remaining",
+)
+BUDGET_FIELDS = ("max_hypotheses", "max_executable_attacks", "max_runtime_seconds")
+ACCEPTED_BUDGET_FIELDS = BUDGET_FIELDS + (
+    "max_retries_per_attack",
+    "max_output_bytes",
+    "max_generated_artifacts",
+)
+STOP_CONDITIONS = {"frontier_exhausted", "slice_verified"}
+LEGAL_STOP_CONDITIONS = {
+    "slice_verified",
+    "frontier_exhausted",
+    "user_information_required",
+    "approval_required",
+    "interpretation_deadlock",
+    "stuck_escalation",
+}
+
 
 def budget_usage(records: list[dict[str, Any]], budget: dict[str, int]) -> dict[str, int]:
+    if not isinstance(records, list):
+        raise ValueError("records must be a list of audit records.")
+    limits = _validated_budget(budget)
     attempts = _billable_attempts(records)
     hypotheses = {a.get("hypothesis") for a in attempts if a.get("hypothesis")}
     hypotheses_used = len(hypotheses)
@@ -14,21 +41,30 @@ def budget_usage(records: list[dict[str, Any]], budget: dict[str, int]) -> dict[
     runtime_seconds_used = _audit_runtime_seconds(records, attempts)
     return {
         "hypotheses_used": hypotheses_used,
-        "hypotheses_remaining": max(budget.get("max_hypotheses", 0) - hypotheses_used, 0),
+        "hypotheses_remaining": max(limits["max_hypotheses"] - hypotheses_used, 0),
         "attacks_used": attacks_used,
-        "attacks_remaining": max(budget.get("max_executable_attacks", 0) - attacks_used, 0),
+        "attacks_remaining": max(limits["max_executable_attacks"] - attacks_used, 0),
         "runtime_seconds_used": runtime_seconds_used,
-        "runtime_seconds_remaining": max(budget.get("max_runtime_seconds", 0) - runtime_seconds_used, 0),
+        "runtime_seconds_remaining": max(limits["max_runtime_seconds"] - runtime_seconds_used, 0),
     }
 
 
 def audit_stop_gate(
     usage: dict[str, int], budget: dict[str, int], stop_condition: str
 ) -> dict[str, Any]:
+    invalid = _usage_validation_error(usage)
+    if invalid:
+        return {"allowed": False, "reason": invalid}
+    try:
+        _validated_budget(budget)
+    except ValueError as exc:
+        return {"allowed": False, "reason": str(exc)}
+    if stop_condition not in LEGAL_STOP_CONDITIONS:
+        return {"allowed": False, "reason": f"unknown stop_condition: {stop_condition}"}
     exhausted = (
-        usage.get("hypotheses_remaining", 1) == 0
-        or usage.get("attacks_remaining", 1) == 0
-        or usage.get("runtime_seconds_remaining", 1) == 0
+        usage["hypotheses_remaining"] == 0
+        or usage["attacks_remaining"] == 0
+        or usage["runtime_seconds_remaining"] == 0
     )
     if not exhausted:
         return {"allowed": True, "reason": "audit budget not exhausted"}
@@ -40,6 +76,40 @@ def audit_stop_gate(
     if stop_condition == "slice_verified":
         return {"allowed": False, "reason": "audit budget exhausted, cannot verify new slice"}
     return {"allowed": True, "reason": f"audit budget exhausted, allowing {stop_condition}"}
+
+
+def _validated_budget(budget: dict[str, int]) -> dict[str, int]:
+    if not isinstance(budget, dict):
+        raise ValueError("budget must be a mapping of non-negative integer limits.")
+    unknown = sorted(str(key) for key in budget if key not in ACCEPTED_BUDGET_FIELDS)
+    if unknown:
+        raise ValueError(f"unknown budget field(s): {', '.join(unknown)}")
+    limits: dict[str, int] = {}
+    for field in BUDGET_FIELDS:
+        value = budget.get(field, 0)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"budget field {field} must be a non-negative integer.")
+        limits[field] = value
+    for field in ACCEPTED_BUDGET_FIELDS:
+        if field in BUDGET_FIELDS or field not in budget:
+            continue
+        value = budget[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"budget field {field} must be a non-negative integer.")
+    return limits
+
+
+def _usage_validation_error(usage: dict[str, int]) -> str:
+    if not isinstance(usage, dict):
+        return "usage must be a mapping of non-negative integer counters"
+    missing = [field for field in USAGE_FIELDS if field not in usage]
+    if missing:
+        return f"missing usage fields: {', '.join(missing)}"
+    for field in USAGE_FIELDS:
+        value = usage[field]
+        if not isinstance(value, int) or value < 0:
+            return f"usage field {field} must be a non-negative integer"
+    return ""
 
 
 def _billable_attempts(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -99,7 +169,7 @@ def _attempt_key(record: dict[str, Any]) -> str:
 
 def _fresh_after_baseline(record: dict[str, Any], baseline: Any) -> bool:
     timestamp = parse_aware_time(record.get("timestamp"))
-    return timestamp is not None and timestamp > baseline
+    return timestamp is not None and timestamp >= baseline
 
 
 def _audit_runtime_seconds(

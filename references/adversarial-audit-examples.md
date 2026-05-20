@@ -1,6 +1,6 @@
 # Adversarial Audit Examples
 
-These records are deterministic fixtures for `scripts/adversarial_audit_lint.py` and `scripts/adversarial_audit_suite.py`.
+These records are deterministic examples for `scripts/adversarial_audit_lint.py`; maintainer release suites that exercise them live under `archive/release-tests/`.
 
 ```json
 [

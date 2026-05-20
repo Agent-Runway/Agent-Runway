@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -78,9 +79,13 @@ def base_env(tmp: Path) -> dict[str, str]:
     return env
 
 
+def write_runtime_secret(path: Path) -> None:
+    path.write_text(secrets.token_hex(32), encoding="utf-8")
+
+
 def generated_settings(host: str, secret_path: Path) -> dict[str, Any]:
     proc = subprocess.run(
-        [PYTHON, "scripts/generate_host_config.py", "--host", host, "--project-dir", str(REPO_ROOT), "--secret-path", str(secret_path)],
+        [PYTHON, "scripts/generate_host_config.py", "--host", host, "--agent-runway-dir", str(REPO_ROOT), "--secret-path", str(secret_path)],
         cwd=str(REPO_ROOT),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -123,7 +128,7 @@ def prepare_active_mission(env: dict[str, str]) -> None:
 
 def experiment_claude(tmp: Path) -> dict[str, Any]:
     env = base_env(tmp)
-    Path(env["ILH_SECRET_PATH"]).write_text("secret", encoding="utf-8")
+    write_runtime_secret(Path(env["ILH_SECRET_PATH"]))
     settings = generated_settings("claude-code", Path(env["ILH_SECRET_PATH"]))
     pre_cmd = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     stop_cmd = settings["hooks"]["Stop"][0]["hooks"][0]["command"]
@@ -160,7 +165,8 @@ def experiment_pi(tmp: Path) -> dict[str, Any]:
 
 def experiment_opencode(tmp: Path) -> dict[str, Any]:
     env = base_env(tmp)
-    Path(env["ILH_SECRET_PATH"]).write_text("secret", encoding="utf-8")
+    env.pop("ILH_DB_PATH", None)
+    write_runtime_secret(Path(env["ILH_SECRET_PATH"]))
     settings = generated_settings("opencode", Path(env["ILH_SECRET_PATH"]))
     settings["mcp"]["agent-runway"]["environment"]["ILH_OPENCODE_BRIDGE"] = "1"
     node_script = tmp / "opencode-plugin-experiment.mjs"
@@ -168,8 +174,9 @@ def experiment_opencode(tmp: Path) -> dict[str, Any]:
     node_env = env | {"OPENCODE_CONFIG_CONTENT": json.dumps(settings), "AGENT_RUNWAY_OPENCODE_PLUGIN": str(REPO_ROOT / ".opencode" / "plugins" / "agent-runway.js")}
     proc = run(["node", str(node_script)], REPO_ROOT, node_env, 30)
     payload = json.loads(proc["stdout"] or "{}")
-    passed = proc["returncode"] == 0 and payload.get("blocked") is True and "secret" in payload.get("message", "").lower()
-    return result("opencode_plugin_bridge_configured_block", passed, {"payload": payload, "stderr_tail": tail(proc["stderr"])}, [".opencode/plugins/agent-runway.js", "scripts/opencode_plugin_bridge.py", "scripts/claude_hooks.py"])
+    message = payload.get("message", "").lower()
+    passed = proc["returncode"] == 0 and payload.get("blocked") is True and "state" in message
+    return result("opencode_plugin_bridge_project_state_block", passed, {"payload": payload, "stderr_tail": tail(proc["stderr"])}, [".opencode/plugins/agent-runway.js", "scripts/opencode_plugin_bridge.py", "scripts/claude_hooks.py"])
 
 
 def main() -> int:

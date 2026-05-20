@@ -57,8 +57,13 @@ def main() -> int:
             issues.append(str(exc))
     if not (root / "agents" / "openai.yaml").exists():
         issues.append("agents/openai.yaml missing")
-    if not (root / "scripts" / "release_gate.py").exists():
-        issues.append("scripts/release_gate.py missing")
+    for rel in [
+        "mcp/server.py",
+        "scripts/generate_host_config.py",
+        "scripts/smoke_test.py",
+    ]:
+        if not (root / rel).exists():
+            issues.append(f"{rel} missing")
     payload = {"issues": issues, "passed": not issues}
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0 if not issues else 2

@@ -9,8 +9,9 @@ let message = "";
 try {
   await server["tool.execute.before"]({
     sessionID: "opencode-experiment",
+    cwd: process.cwd(),
     tool: "read",
-    args: { filePath: process.env.ILH_SECRET_PATH },
+    args: { filePath: `${process.cwd()}/.agent-runway/state.db` },
   }, {});
 } catch (error) {
   blocked = true;

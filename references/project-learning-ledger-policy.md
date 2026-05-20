@@ -1,6 +1,6 @@
 # Project Learning Ledger Policy
 
-Project Learning Ledger is a reviewable project learning layer for Agent-Runway. It records verified project pitfalls, validated runbooks, project-scoped preferences, and durable invariants so future agents choose safer next steps.
+Project Learning Ledger is a reviewable project learning layer for Agent-Runway. Each project keeps its own verified pitfalls, validated runbooks, project-scoped preferences, and durable invariants so future agents choose safer next steps without cross-project contamination.
 
 ## Purpose
 
@@ -14,11 +14,11 @@ Preference is not authorization.
 
 Project Learning Ledger is not a global memory system, RAG layer, embedding index, vector store, Markdown canonical source, MCP write tool, completion evidence source, authorization source, or hidden personality profile.
 
-The release canonical source is `references/project-learning-ledger.jsonl`. SQLite remains for runtime missions, receipts, budgets, approvals, decisions, and counterexamples.
+The project-local canonical source is `.agent-runway/project-learning-ledger.jsonl` in the active project workspace. Project ledger JSON/JSONL files, including schema copies, are local project data and must not be committed, packaged, mirrored, or published with the Agent-Runway skill release. SQLite remains for runtime missions, receipts, budgets, approvals, decisions, and counterexamples.
 
 ## Memory Routing
 
-User preferences and other common cross-project memory should be written first to the active CLI's SQLite-backed memory store when that store exists. Project-specific pitfalls, runbooks, invariants, and project-scoped preferences should be written first to the project ledger and may also be mirrored into `.agent-runway/project-learning-ledger.jsonl` or a future project-local SQLite cache.
+User preferences and other common cross-project memory should be written first to the active CLI's SQLite-backed memory store when that store exists. Project-specific pitfalls, runbooks, invariants, and project-scoped preferences should be written first to `.agent-runway/project-learning-ledger.jsonl` in the current project and may later be indexed into a future project-local SQLite cache.
 
 Do not route a project pitfall into common memory unless it is explicitly generalized and safe outside this repository. Do not route a common user preference into the project ledger unless it changes behavior for this project specifically.
 
@@ -26,7 +26,7 @@ Do not route a project pitfall into common memory unless it is explicitly genera
 
 - Memory poisoning: require `source_refs`, type/status gates, and release review before records become active.
 - Stale memory misguidance: require `invalid_if`, allow `expires_at`, and fail strict lint when an active record is expired.
-- Cross-project contamination: require scoped `applies_to` data and route common preferences separately from project-specific records.
+- Cross-project contamination: require scoped `applies_to` data, keep ledger files under the current project's ignored `.agent-runway/` directory, and route common preferences separately from project-specific records.
 - Preference escalation into authorization: reject authorization language in preferences and require fresh user authorization records for irreversible actions.
 - Sensitive information leakage: scan for tokens, private keys, bearer strings, and similar secrets before a record can pass lint.
 - Context pollution: limit query results, sort by risk and recency, and exclude draft/candidate/disputed/obsolete records from normal intake.
@@ -64,7 +64,7 @@ Pitfalls and runbooks need `invalid_if`; active records should also include `las
 
 ## Privacy
 
-Do not record secrets, tokens, private keys, email addresses, personal identity details, emotional profiles, or broad personality claims. Do not turn repeated workflow preferences into long-term personal profiling. The ledger is a project artifact and can be reviewed or packaged.
+Do not record secrets, tokens, private keys, email addresses, personal identity details, emotional profiles, or broad personality claims. Do not turn repeated workflow preferences into long-term personal profiling. The ledger is a local project artifact for review, not a skill release artifact for packaging.
 
 ## Completion And Authorization Boundaries
 

@@ -111,6 +111,28 @@ class TestAdversarialAuditBudget(unittest.TestCase):
 
         self.assertEqual(usage["runtime_seconds_used"], 0)
 
+    def test_budget_usage_rejects_malformed_records_and_budget_values(self):
+        with self.assertRaises(ValueError):
+            budget_usage(None, budget())  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            budget_usage([audit_plan()], {"max_hypotheses": "3"})  # type: ignore[dict-item]
+        with self.assertRaises(ValueError):
+            budget_usage([audit_plan()], {"max_hypotheses": -1})
+        with self.assertRaisesRegex(ValueError, "unknown budget field"):
+            budget_usage([audit_plan()], {"total_budget": 5})  # type: ignore[dict-item]
+        with self.assertRaisesRegex(ValueError, "max_retries_per_attack"):
+            budget_usage([audit_plan()], {**budget(), "max_retries_per_attack": True})  # type: ignore[dict-item]
+
+    def test_equal_baseline_timestamp_attempt_counts_as_fresh(self):
+        from agent_runway_runtime.adversarial_audit import _fresh_billable_attempts
+
+        plan = audit_plan("2026-05-10T10:00:00Z")
+        attempt = audit_attempt("attempt-equal", "hypothesis-equal", "2026-05-10T10:00:00Z")
+
+        fresh = _fresh_billable_attempts([plan, attempt], [plan])
+
+        self.assertEqual(["attempt-equal"], [item["attempt_id"] for item in fresh])
+
     def test_audit_stop_gate_allows_frontier_exhausted_when_budget_exhausted(self):
         """audit_stop_gate() should allow frontier_exhausted as wrap-up when budget exhausted."""
         audit_budget = budget(max_hypotheses=2, max_executable_attacks=2)
@@ -140,6 +162,32 @@ class TestAdversarialAuditBudget(unittest.TestCase):
         result = audit_stop_gate(usage, audit_budget, stop_condition="slice_verified")
         self.assertFalse(result["allowed"])
         self.assertIn("budget exhausted", result.get("reason", "").lower())
+
+    def test_audit_stop_gate_rejects_unknown_stop_condition_when_budget_exhausted(self):
+        audit_budget = budget(max_hypotheses=2, max_executable_attacks=2)
+        usage = {
+            "hypotheses_used": 2,
+            "hypotheses_remaining": 0,
+            "attacks_used": 2,
+            "attacks_remaining": 0,
+            "runtime_seconds_used": 300,
+            "runtime_seconds_remaining": 0,
+        }
+
+        result = audit_stop_gate(usage, audit_budget, stop_condition="slice_verfied")
+
+        self.assertFalse(result["allowed"])
+        self.assertIn("unknown stop_condition", result.get("reason", "").lower())
+
+    def test_audit_stop_gate_rejects_missing_usage_fields(self):
+        result = audit_stop_gate(
+            {"hypotheses_remaining": 0},
+            budget(max_hypotheses=2, max_executable_attacks=2),
+            stop_condition="frontier_exhausted",
+        )
+
+        self.assertFalse(result["allowed"])
+        self.assertIn("missing usage fields", result.get("reason", "").lower())
 
 
 def audit_plan(freshness_timestamp: str = "") -> dict[str, object]:

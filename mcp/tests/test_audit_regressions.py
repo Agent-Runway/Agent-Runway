@@ -51,6 +51,16 @@ class AuditRegressionTestCase(unittest.TestCase):
             metadata={"stdout_sha256": "audit"},
         )
 
+    def approve_verified_slice(self, session_id: str, task_id: str, receipt_id: str) -> None:
+        approved = self.server.turn_end_gate(
+            session_id=session_id,
+            task_id=task_id,
+            stop_condition="slice_verified",
+            work_summary="Recorded a verified slice before testing completion behavior.",
+            receipt_ids=[receipt_id],
+        )
+        self.assertIn("APPROVED", approved)
+
     def test_hooks_deny_state_db_reads_from_read_and_shell_tools(self) -> None:
         cases = [
             ("Read", {"file_path": str(self.db_path)}),
@@ -66,6 +76,7 @@ class AuditRegressionTestCase(unittest.TestCase):
         criterion = "验证模型精度"
         self.server.mission_lock("s1", "cn-verify", "goal", [criterion])
         receipt = self.make_receipt("s1", "cn-verify", "Read", "metrics.md")
+        self.approve_verified_slice("s1", "cn-verify", receipt.receipt_id)
         rejected = self.server.completion_gate(
             "s1",
             "cn-verify",
@@ -87,6 +98,7 @@ class AuditRegressionTestCase(unittest.TestCase):
             with self.subTest(criterion=criterion):
                 self.server.mission_lock("s1", task_id, "goal", [criterion])
                 receipt = self.make_receipt("s1", task_id, "Read", "notes.md")
+                self.approve_verified_slice("s1", task_id, receipt.receipt_id)
                 rejected = self.server.completion_gate(
                     "s1",
                     task_id,
@@ -122,6 +134,7 @@ class AuditRegressionTestCase(unittest.TestCase):
         task_id = "t1'; DROP TABLE missions;--"
         self.server.mission_lock(session_id, task_id, "goal", ["tests pass"])
         receipt = self.make_receipt(session_id, task_id)
+        self.approve_verified_slice(session_id, task_id, receipt.receipt_id)
         approved = self.server.completion_gate(
             session_id,
             task_id,
@@ -150,6 +163,7 @@ class AuditRegressionTestCase(unittest.TestCase):
     def test_completed_mission_rejects_later_state_transitions(self) -> None:
         self.server.mission_lock("s1", "done-task", "goal", ["tests pass"])
         receipt = self.make_receipt("s1", "done-task")
+        self.approve_verified_slice("s1", "done-task", receipt.receipt_id)
         self.server.completion_gate(
             "s1",
             "done-task",

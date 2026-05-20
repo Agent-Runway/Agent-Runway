@@ -19,12 +19,16 @@ A claim should be no stronger than the receipts behind it.
 | file changed as intended | read-back, diff, or file hash after write |
 | test passes | fresh command output or Bash receipt with exit code 0 |
 | bug fixed | original symptom re-tested and shown absent |
-| completion achieved | every completion criterion mapped to receipts |
+| completion achieved | fresh approved `turn_end_gate` plus every completion criterion mapped to receipts covered by that latest turn gate |
 | blocked on user | evidence that available local work was exhausted first |
 
 ## Mapping rule
 
 For `completion_gate`, every criterion must map to one or more receipt ids.
+
+Those receipt ids must also be covered by the latest fresh approved `turn_end_gate`.
+This keeps stop legality, child-task disclosure, and receipt selection bound to the
+same evidence set used for final completion.
 
 Do not map by narrative similarity. Map by actual evidentiary support.
 

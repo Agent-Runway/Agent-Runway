@@ -70,6 +70,26 @@ class AdversarialAuditPlanEdgesTestCase(unittest.TestCase):
 
         self.assertIn("audit_plan requires freshness_baseline.latest_receipt_seq >= 0", issues)
 
+    def test_gate_rejects_future_latest_receipt_seq_baseline(self) -> None:
+        records = [audit_plan(latest_receipt_seq=99999), audit_attempt()]
+
+        issues = gate_violations(records, ["runtime_gate_adversary"], ["claim-1"], 3)
+
+        self.assertTrue(
+            any("freshness_baseline.latest_receipt_seq cannot exceed latest receipt seq 3" in issue for issue in issues)
+        )
+
+    def test_direct_freshness_baseline_lint_rejects_future_seq_when_latest_seq_is_known(self) -> None:
+        from agent_runway_runtime.adversarial_audit_plan_edges import lint_freshness_baseline
+
+        issues: list[str] = []
+        lint_freshness_baseline({"latest_receipt_seq": 99999}, issues, latest_receipt_seq=3)
+
+        self.assertIn(
+            "audit_plan freshness_baseline.latest_receipt_seq cannot exceed latest receipt seq 3: 99999",
+            issues,
+        )
+
     def test_non_object_record_reports_index_without_crashing_gate(self) -> None:
         issues = gate_violations([audit_plan(), ["not", "an", "object"]], [], [], 3)  # type: ignore[list-item]
 

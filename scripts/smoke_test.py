@@ -7,12 +7,15 @@ import os
 import tempfile
 from pathlib import Path
 
+HARNESS_SECRET = 'a' * 64
+
 
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
     temp_dir = tempfile.TemporaryDirectory()
     os.environ['ILH_DB_PATH'] = str(Path(temp_dir.name) / 'state.db')
     os.environ['ILH_SECRET_PATH'] = str(Path(temp_dir.name) / 'secret.key')
+    os.environ.setdefault('ILH_HARNESS_SECRET', HARNESS_SECRET)
 
     import sys
     mcp_root = str(repo_root / 'mcp')

@@ -39,6 +39,17 @@ class HookTestCase(unittest.TestCase):
         self.temp_dir.cleanup()
         os.environ.pop("ILH_DB_PATH", None)
         os.environ.pop("ILH_SECRET_PATH", None)
+        os.environ.pop("ILH_DEBUG", None)
+        os.environ.pop("ILH_DEBUG_LOG_PATH", None)
+
+    def enable_debug(self) -> Path:
+        log_path = Path(self.temp_dir.name) / "debug.log"
+        os.environ["ILH_DEBUG"] = "1"
+        os.environ["ILH_DEBUG_LOG_PATH"] = str(log_path)
+        return log_path
+
+    def read_debug_entries(self, log_path: Path) -> list[dict[str, object]]:
+        return [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
 
     def test_pre_tool_use_asks_for_risky_bash(self) -> None:
         event = {"tool_name": "Bash", "tool_input": {"command": "git push origin main"}}
@@ -70,6 +81,26 @@ class HookTestCase(unittest.TestCase):
             result = self.hooks.pre_tool_use(event)
         self.assertEqual(result, 0)
         payload = json.loads(buf.getvalue())
+        decision = payload["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual(decision, "deny")
+
+    def test_command_entrypoint_denies_secret_read(self) -> None:
+        repo_root = Path(__file__).resolve().parents[2]
+        event = {
+            "tool_name": "Read",
+            "tool_input": {"file_path": str(self.secret_path)},
+        }
+        proc = subprocess.run(
+            [sys.executable, str(repo_root / "scripts" / "claude_hooks.py"), "pre-tool-use"],
+            input=json.dumps(event),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = json.loads(proc.stdout)
         decision = payload["hookSpecificOutput"]["permissionDecision"]
         self.assertEqual(decision, "deny")
 
@@ -195,6 +226,7 @@ class HookTestCase(unittest.TestCase):
         self.assertEqual(decision, "deny")
 
     def test_pre_tool_use_fails_closed_when_event_parse_failed(self) -> None:
+        log_path = self.enable_debug()
         buf = io.StringIO()
         with redirect_stdout(buf):
             result = self.hooks.pre_tool_use(
@@ -205,6 +237,11 @@ class HookTestCase(unittest.TestCase):
         decision = payload["hookSpecificOutput"]["permissionDecision"]
         self.assertEqual(decision, "deny")
         self.assertIn("parse", payload["hookSpecificOutput"]["permissionDecisionReason"].lower())
+        entries = self.read_debug_entries(log_path)
+        matching = [entry for entry in entries if entry["event"] == "hook.validation_error"]
+        self.assertEqual(1, len(matching))
+        self.assertEqual("pre_tool_use", matching[0]["details"]["entrypoint"])
+        self.assertEqual("json_decode_failed", matching[0]["details"]["error"])
 
     def test_session_start_records_actual_host_instead_of_hard_coding_claude_code(self) -> None:
         event = {"session_id": "s1", "cwd": self.temp_dir.name, "host": "codex-cli"}
@@ -218,7 +255,72 @@ class HookTestCase(unittest.TestCase):
             ).fetchone()
         self.assertEqual(row["host"], "codex-cli")
 
+    def test_session_start_without_explicit_db_path_uses_event_project_state(self) -> None:
+        os.environ.pop("ILH_DB_PATH", None)
+        self.hooks = importlib.reload(self.hooks)
+        project_dir = Path(self.temp_dir.name) / "project"
+        project_dir.mkdir()
+
+        result = self.hooks.session_start(
+            {"session_id": "project-session", "cwd": str(project_dir), "host": "opencode"}
+        )
+
+        self.assertEqual(result, 0)
+        project_db = project_dir / ".agent-runway" / "state.db"
+        self.assertTrue(project_db.exists())
+        with closing(sqlite3.connect(project_db)) as conn:
+            row = conn.execute(
+                "SELECT host, cwd FROM sessions WHERE session_id=?", ("project-session",)
+            ).fetchone()
+        self.assertEqual(row, ("opencode", str(project_dir)))
+        self.assertFalse((Path(self.temp_dir.name) / ".agent-runway" / "state.db").exists())
+
+    def test_pre_tool_use_without_explicit_db_path_denies_event_project_state_reads(self) -> None:
+        os.environ.pop("ILH_DB_PATH", None)
+        self.hooks = importlib.reload(self.hooks)
+        project_dir = Path(self.temp_dir.name) / "project-state-guard"
+        project_db = project_dir / ".agent-runway" / "state.db"
+
+        cases = [
+            ("Read", {"file_path": str(project_db)}),
+            ("Bash", {"command": f"cat {project_db}"}),
+        ]
+        for tool_name, tool_input in cases:
+            with self.subTest(tool_name=tool_name):
+                event = {
+                    "cwd": str(project_dir),
+                    "tool_name": tool_name,
+                    "tool_input": tool_input,
+                }
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    result = self.hooks.pre_tool_use(event)
+
+                self.assertEqual(0, result)
+                payload = json.loads(buf.getvalue())
+                decision = payload["hookSpecificOutput"]["permissionDecision"]
+                self.assertEqual("deny", decision)
+
+    def test_pre_tool_use_without_cwd_denies_runtime_fallback_state_reads(self) -> None:
+        os.environ.pop("ILH_DB_PATH", None)
+        self.hooks = importlib.reload(self.hooks)
+        repo_db = Path(self.hooks.REPO_ROOT) / ".agent-runway" / "state.db"
+
+        event = {
+            "tool_name": "Read",
+            "tool_input": {"file_path": str(repo_db)},
+        }
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            result = self.hooks.pre_tool_use(event)
+
+        self.assertEqual(0, result)
+        payload = json.loads(buf.getvalue())
+        decision = payload["hookSpecificOutput"]["permissionDecision"]
+        self.assertEqual("deny", decision)
+
     def test_session_start_does_not_create_session_when_event_parse_failed(self) -> None:
+        log_path = self.enable_debug()
         result = self.hooks.session_start(
             {"error": "json_decode_failed", "raw_preview_sha256": "abc123"}
         )
@@ -227,6 +329,11 @@ class HookTestCase(unittest.TestCase):
         with closing(sqlite3.connect(self.db_path)) as conn:
             row = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()
         self.assertEqual(row[0], 0)
+        entries = self.read_debug_entries(log_path)
+        matching = [entry for entry in entries if entry["event"] == "hook.validation_error"]
+        self.assertEqual(1, len(matching))
+        self.assertEqual("session_start", matching[0]["details"]["entrypoint"])
+        self.assertEqual("json_decode_failed", matching[0]["details"]["error"])
 
     def test_stop_blocks_without_fresh_gate(self) -> None:
         self.server.mission_lock("s1", "t1", "goal", ["criterion"])
@@ -269,7 +376,107 @@ class HookTestCase(unittest.TestCase):
         result = self.hooks.stop(event)
         self.assertEqual(result, 0)
 
+    def test_stop_allows_after_turn_gate_post_tool_receipt(self) -> None:
+        self.server.mission_lock("s1", "t1", "goal", ["criterion"])
+        receipt = self.store.record_receipt(
+            session_id="s1",
+            task_id="t1",
+            source="test",
+            tool_name="Bash",
+            command_text="pytest -q",
+            exit_code=0,
+            metadata={},
+        )
+        self.server.turn_end_gate(
+            session_id="s1",
+            task_id="t1",
+            stop_condition="slice_verified",
+            work_summary="Ran a verified slice with concrete command output evidence.",
+            receipt_ids=[receipt.receipt_id],
+        )
+        approval = self.store.latest_approval("s1", "t1", "turn_end_gate")
+        self.assertTrue(self.store.is_approval_fresh(approval, "s1", "t1"))
+
+        self.hooks.post_tool_use(
+            {
+                "session_id": "s1",
+                "cwd": self.temp_dir.name,
+                "hook_event_name": "PostToolUse",
+                "tool_name": "agent-runway_turn_end_gate",
+                "tool_input": {
+                    "session_id": "s1",
+                    "task_id": "t1",
+                    "stop_condition": "slice_verified",
+                    "work_summary": "Ran a verified slice with concrete command output evidence.",
+                    "receipt_ids": [receipt.receipt_id],
+                },
+                "tool_response": {"content": "APPROVED"},
+            }
+        )
+
+        self.assertTrue(self.store.is_approval_fresh(approval, "s1", "t1"))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            result = self.hooks.stop({"session_id": "s1", "cwd": self.temp_dir.name})
+        self.assertEqual(result, 0)
+        self.assertEqual("", buf.getvalue())
+
+    def test_stop_allows_after_completion_gate_post_tool_receipt(self) -> None:
+        self.server.mission_lock("s1", "t1", "goal", ["tests pass"])
+        receipt = self.store.record_receipt(
+            session_id="s1",
+            task_id="t1",
+            source="test",
+            tool_name="Bash",
+            command_text="pytest -q",
+            exit_code=0,
+            metadata={},
+        )
+        self.server.turn_end_gate(
+            session_id="s1",
+            task_id="t1",
+            stop_condition="slice_verified",
+            work_summary="Ran the required test command before completing the mission.",
+            receipt_ids=[receipt.receipt_id],
+        )
+        self.server.completion_gate(
+            session_id="s1",
+            task_id="t1",
+            criterion_receipt_map=[
+                {"criterion": "tests pass", "receipt_ids": [receipt.receipt_id]}
+            ],
+            completion_summary="Ran the required test command and observed a zero-exit result.",
+        )
+        approval = self.store.latest_approval("s1", "t1", "completion_gate")
+        self.assertTrue(self.store.is_approval_fresh(approval, "s1", "t1"))
+
+        self.hooks.post_tool_use(
+            {
+                "session_id": "s1",
+                "cwd": self.temp_dir.name,
+                "hook_event_name": "PostToolUse",
+                "tool_name": "agent-runway_completion_gate",
+                "tool_input": {
+                    "session_id": "s1",
+                    "task_id": "t1",
+                    "completion_summary": "Ran the required test command and observed a zero-exit result.",
+                    "criterion_receipt_map": [
+                        {"criterion": "tests pass", "receipt_ids": [receipt.receipt_id]}
+                    ],
+                },
+                "tool_response": {"content": "APPROVED"},
+            }
+        )
+
+        self.assertTrue(self.store.is_approval_fresh(approval, "s1", "t1"))
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            result = self.hooks.stop({"session_id": "s1", "cwd": self.temp_dir.name})
+        self.assertEqual(result, 0)
+        self.assertEqual("", buf.getvalue())
+
     def test_stop_blocks_when_event_parse_failed(self) -> None:
+        log_path = self.enable_debug()
         buf = io.StringIO()
         with redirect_stdout(buf):
             result = self.hooks.stop(
@@ -279,6 +486,11 @@ class HookTestCase(unittest.TestCase):
         payload = json.loads(buf.getvalue())
         self.assertFalse(payload["continue"])
         self.assertIn("parse", payload["stopReason"].lower())
+        entries = self.read_debug_entries(log_path)
+        matching = [entry for entry in entries if entry["event"] == "hook.validation_error"]
+        self.assertEqual(1, len(matching))
+        self.assertEqual("stop", matching[0]["details"]["entrypoint"])
+        self.assertEqual("json_decode_failed", matching[0]["details"]["error"])
 
     def test_stop_requires_fresh_completion_gate_after_completion(self) -> None:
         self.server.mission_lock("s1", "t1", "goal", ["tests pass"])
@@ -290,6 +502,13 @@ class HookTestCase(unittest.TestCase):
             command_text="pytest -q",
             exit_code=0,
             metadata={},
+        )
+        self.server.turn_end_gate(
+            session_id="s1",
+            task_id="t1",
+            stop_condition="slice_verified",
+            work_summary="Ran the required test command before completing the mission.",
+            receipt_ids=[receipt.receipt_id],
         )
         self.server.completion_gate(
             session_id="s1",
@@ -332,7 +551,33 @@ class HookTestCase(unittest.TestCase):
         self.assertEqual(receipts[0].exit_code, 7)
         self.assertIn("pytest", receipts[0].command_text)
 
+    def test_post_tool_use_normalizes_exit_code_aliases_and_rejects_bool(self) -> None:
+        cases = [
+            ("top-exit-code", {"exit_code": "7"}, 7),
+            ("top-exit-code-camel", {"exitCode": 8}, 8),
+            ("top-exit", {"exit": "9"}, 9),
+            ("metadata-exit", {"metadata": {"exit": "10"}}, 10),
+            ("bool-exit", {"exit": False}, None),
+            ("text-exit", {"exit": "success"}, None),
+        ]
+        for task_id, tool_response, expected in cases:
+            with self.subTest(task_id=task_id):
+                session_id = f"s-{task_id}"
+                self.server.mission_lock(session_id, task_id, "goal", ["criterion"])
+                event = {
+                    "session_id": session_id,
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "pytest -q"},
+                    "tool_response": tool_response,
+                    "hook_event_name": "PostToolUse",
+                }
+                result = self.hooks.post_tool_use(event)
+                self.assertEqual(result, 0)
+                receipts = self.store.list_recent_receipts(session_id, task_id, limit=1)
+                self.assertEqual(receipts[0].exit_code, expected)
+
     def test_post_tool_use_does_not_record_receipt_when_event_parse_failed(self) -> None:
+        log_path = self.enable_debug()
         self.server.mission_lock("s1", "t1", "goal", ["criterion"])
         result = self.hooks.post_tool_use(
             {"error": "json_decode_failed", "raw_preview_sha256": "abc123"}
@@ -340,6 +585,11 @@ class HookTestCase(unittest.TestCase):
         self.assertEqual(result, 0)
         receipts = self.store.list_recent_receipts("s1", "t1", limit=10)
         self.assertEqual(receipts, [])
+        entries = self.read_debug_entries(log_path)
+        matching = [entry for entry in entries if entry["event"] == "hook.validation_error"]
+        self.assertEqual(1, len(matching))
+        self.assertEqual("post_tool_use", matching[0]["details"]["entrypoint"])
+        self.assertEqual("json_decode_failed", matching[0]["details"]["error"])
 
     def test_sha256_text_handles_surrogate_characters(self) -> None:
         digest = self.hooks.sha256_text(chr(0xDCBD))
@@ -474,6 +724,11 @@ class HookTestCase(unittest.TestCase):
         receipts = self.store.list_recent_receipts("orphan-session", limit=10)
         self.assertEqual(len(receipts), 1)
         self.assertIsNone(receipts[0].task_id)
+        self.assertEqual(receipts[0].metadata["scope_status"], "unscoped")
+        self.assertEqual(
+            receipts[0].metadata["scope_reason"],
+            "no_active_mission_or_binding",
+        )
 
     def test_hook_post_tool_use_maps_unique_active_cwd_when_host_session_id_changes(self) -> None:
         self.server.mission_lock(
@@ -531,8 +786,80 @@ class HookTestCase(unittest.TestCase):
         orphan = self.store.list_recent_receipts("host-session", limit=10)
         self.assertEqual(len(orphan), 1)
         self.assertIsNone(orphan[0].task_id)
+        self.assertEqual(orphan[0].metadata["scope_status"], "unscoped")
+        self.assertEqual(orphan[0].metadata["scope_reason"], "ambiguous_cwd_mission")
         self.assertEqual(self.store.list_recent_receipts("mission-session-a", "active-task-a", limit=10), [])
         self.assertEqual(self.store.list_recent_receipts("mission-session-b", "active-task-b", limit=10), [])
+
+    def test_subagent_start_registers_child_span_from_agent_runway_contract(self) -> None:
+        self.server.mission_lock("s1", "parent-task", "goal", ["criterion"])
+        event = {
+            "session_id": "s1",
+            "hook_event_name": "SubagentStart",
+            "agent_runway": {
+                "task_id": "parent-task",
+                "subagent_type": "code-reviewer",
+                "delegated_scope": "review parser changes only",
+                "delegated_budget": {"max_tool_calls": 5},
+                "host_child_id": "claude-child-1",
+                "context_mode": "fresh",
+                "workspace_kind": "shared_checkout",
+            },
+        }
+
+        result = self.hooks.subagent_start(event)
+
+        self.assertEqual(result, 0)
+        spans = self.store.list_subagent_spans("s1", "parent-task")
+        self.assertEqual(len(spans), 1)
+        self.assertEqual(spans[0].host, "claude-code")
+        self.assertEqual(spans[0].subagent_type, "code-reviewer")
+        self.assertEqual(spans[0].status, "running")
+
+    def test_subagent_stop_closes_child_span_from_agent_runway_contract(self) -> None:
+        self.server.mission_lock("s1", "parent-task", "goal", ["criterion"])
+        child = json.loads(
+            self.server.register_subagent_start(
+                session_id="s1",
+                task_id="parent-task",
+                subagent_type="code-reviewer",
+                delegated_scope="review parser changes only",
+                delegated_budget={"max_tool_calls": 5},
+                host="claude-code",
+                host_child_id="claude-child-1",
+            )
+        )
+        event = {
+            "session_id": "s1",
+            "hook_event_name": "SubagentStop",
+            "agent_runway": {
+                "task_id": "parent-task",
+                "child_span_id": child["child_span_id"],
+                "status": "completed",
+                "budget_consumed": {"tool_calls": 3},
+                "transcript_ref": "transcripts/child.jsonl",
+                "artifact_refs": ["reports/review.md"],
+                "last_message": "review complete",
+            },
+        }
+
+        result = self.hooks.subagent_stop(event)
+
+        self.assertEqual(result, 0)
+        span = self.store.get_subagent_span("s1", "parent-task", child["child_span_id"])
+        self.assertEqual(span.status, "completed")
+        self.assertEqual(span.budget_consumed["tool_calls"], 3)
+
+    def test_subagent_start_without_contract_records_visibility_only(self) -> None:
+        self.server.mission_lock("s1", "parent-task", "goal", ["criterion"])
+        event = {"session_id": "s1", "hook_event_name": "SubagentStart", "cwd": self.temp_dir.name}
+
+        result = self.hooks.subagent_start(event)
+
+        self.assertEqual(result, 0)
+        self.assertEqual(self.store.list_subagent_spans("s1", "parent-task"), [])
+        receipts = self.store.list_recent_receipts("s1", "parent-task", limit=1)
+        self.assertEqual(receipts[0].tool_name, "SubagentStart")
 
     def test_opencode_bridge_denies_secret_read_before_tool_execution(self) -> None:
         bridge = importlib.import_module("opencode_plugin_bridge")
@@ -598,7 +925,24 @@ class HookTestCase(unittest.TestCase):
         self.assertEqual(decision["decision"], "deny")
         self.assertIn("parse", decision["reason"].lower())
 
+    def test_opencode_bridge_debug_logs_malformed_field_fail_closed(self) -> None:
+        log_path = self.enable_debug()
+        bridge = importlib.import_module("opencode_plugin_bridge")
+        bridge = importlib.reload(bridge)
+
+        decision = bridge.pre_tool_use({"session_id": "s1", "tool_input": "bad"})
+
+        self.assertEqual(decision["decision"], "deny")
+        entries = self.read_debug_entries(log_path)
+        matching = [entry for entry in entries if entry["event"] == "opencode_bridge.validation_error"]
+        self.assertEqual(1, len(matching))
+        details = matching[0]["details"]
+        self.assertEqual("pre_tool_use", details["entrypoint"])
+        self.assertEqual("malformed_field", details["error"])
+        self.assertEqual("tool_input", details["field"])
+
     def test_opencode_bridge_load_event_redacts_raw_payload_on_json_error(self) -> None:
+        log_path = self.enable_debug()
         bridge = importlib.import_module("opencode_plugin_bridge")
         bridge = importlib.reload(bridge)
         original_stdin = sys.stdin
@@ -657,6 +1001,7 @@ class HookTestCase(unittest.TestCase):
         self.assertEqual(event, {})
 
     def test_claude_hooks_load_event_returns_structured_error_on_invalid_json(self) -> None:
+        log_path = self.enable_debug()
         original_stdin = sys.stdin
         stderr = io.StringIO()
         sys.stdin = io.StringIO('{"secret":"value"')
@@ -669,6 +1014,43 @@ class HookTestCase(unittest.TestCase):
         self.assertIn("raw_preview_sha256", event)
         self.assertNotIn("raw_preview", event)
         self.assertNotIn("secret", stderr.getvalue())
+        entries = self.read_debug_entries(log_path)
+        matching = [entry for entry in entries if entry["event"] == "hook.payload_error"]
+        self.assertEqual(1, len(matching))
+        self.assertEqual("claude-hooks", matching[0]["details"]["source"])
+        self.assertEqual("json_decode_failed", matching[0]["details"]["error"])
+
+    def test_claude_hook_debug_logs_malformed_field_fail_closed(self) -> None:
+        log_path = self.enable_debug()
+        buf = io.StringIO()
+
+        with redirect_stdout(buf):
+            result = self.hooks.pre_tool_use({"session_id": "s1", "tool_input": "bad"})
+
+        self.assertEqual(0, result)
+        entries = self.read_debug_entries(log_path)
+        matching = [entry for entry in entries if entry["event"] == "hook.validation_error"]
+        self.assertEqual(1, len(matching))
+        details = matching[0]["details"]
+        self.assertEqual("pre_tool_use", details["entrypoint"])
+        self.assertEqual("malformed_field", details["error"])
+        self.assertEqual("tool_input", details["field"])
+
+    def test_claude_hook_error_debug_logs_unhandled_entrypoint_exception(self) -> None:
+        log_path = self.enable_debug()
+
+        with self.assertRaises(AttributeError):
+            self.hooks.pre_tool_use(None)  # type: ignore[arg-type]
+
+        entries = self.read_debug_entries(log_path)
+        matching = [entry for entry in entries if entry["event"] == "hook.error"]
+        self.assertEqual(1, len(matching))
+        details = matching[0]["details"]
+        self.assertEqual("pre_tool_use", details["entrypoint"])
+        self.assertEqual("AttributeError", details["exception_type"])
+        self.assertEqual("NoneType", details["payload_type"])
+        self.assertNotIn("event", details)
+        self.assertTrue(details["traceback"])
 
     def test_opencode_bridge_load_event_accepts_valid_json_with_utf8_bom(self) -> None:
         bridge = importlib.import_module("opencode_plugin_bridge")
@@ -740,6 +1122,24 @@ class HookTestCase(unittest.TestCase):
         self.assertFalse(result["recorded"])
         receipts = self.store.list_recent_receipts("s1", "t1", limit=10)
         self.assertEqual(receipts, [])
+
+    def test_opencode_bridge_error_debug_logs_unhandled_entrypoint_exception(self) -> None:
+        log_path = self.enable_debug()
+        bridge = importlib.import_module("opencode_plugin_bridge")
+        bridge = importlib.reload(bridge)
+
+        with self.assertRaises(AttributeError):
+            bridge.post_tool_use(None)  # type: ignore[arg-type]
+
+        entries = self.read_debug_entries(log_path)
+        matching = [entry for entry in entries if entry["event"] == "opencode_bridge.error"]
+        self.assertEqual(1, len(matching))
+        details = matching[0]["details"]
+        self.assertEqual("post_tool_use", details["entrypoint"])
+        self.assertEqual("AttributeError", details["exception_type"])
+        self.assertEqual("NoneType", details["payload_type"])
+        self.assertNotIn("event", details)
+        self.assertTrue(details["traceback"])
 
     def test_opencode_bridge_preserves_read_tool_as_observational_receipt(self) -> None:
         bridge = importlib.import_module("opencode_plugin_bridge")
@@ -834,7 +1234,7 @@ class HookTestCase(unittest.TestCase):
                 str(script),
                 "--host",
                 "opencode",
-                "--project-dir",
+                "--agent-runway-dir",
                 str(Path(__file__).resolve().parents[2]),
                 "--secret-path",
                 str(self.secret_path),

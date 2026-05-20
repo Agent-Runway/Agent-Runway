@@ -26,6 +26,8 @@ def read_records(paths: list[Path]) -> list[dict[str, Any]]:
 
 
 def read_one(path: Path) -> list[dict[str, Any]]:
+    if path.suffix == ".jsonl":
+        return records_from_jsonl_path(path)
     text = path.read_text(encoding="utf-8")
     stripped = text.strip()
     if not stripped:
@@ -53,6 +55,15 @@ def records_from_jsonl(path: Path, text: str) -> list[dict[str, Any]]:
     for index, line in enumerate(text.splitlines(), 1):
         if line.strip():
             records.append(loads_with_location(path, line, f"line {index}"))
+    return records
+
+
+def records_from_jsonl_path(path: Path) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for index, line in enumerate(handle, 1):
+            if line.strip():
+                records.append(loads_with_location(path, line, f"line {index}"))
     return records
 
 

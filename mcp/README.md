@@ -7,18 +7,24 @@ This project turns prompt-only diligence into a small control plane with optiona
 | Tool | Purpose |
 |---|---|
 | `mission_lock` | create or refresh a mission namespace with criteria, budgets, and verification planning |
-| `mission_status` | inspect mission state, budgets, and gate freshness |
-| `budget_status` | observe remaining slices, retries, time budget, and gate/approval freshness |
+| `mission_resume` | resume an active mission and optionally refresh an explicit host-session binding |
 | `list_recent_receipts` | inspect recent harness-captured receipts |
+| `budget_status` | observe remaining slices, retries, time budget, and gate/approval freshness |
+| `prompt_intake_gate` | classify short or ambiguous prompts into bounded mission-intake directives |
+| `record_user_authorization` | record explicit user approval; already-authorized commands are not asked about again |
+| `authorization_status` | inspect latest user authorization freshness, kind, and optional requested-scope match |
+| `register_subagent_start` | record a delegated subagent span before child work begins |
+| `record_subagent_handoff` | record verified child-agent handoff claims, receipts, risks, and gaps |
+| `register_subagent_stop` | close a delegated subagent span with status, budget, and artifact references |
+| `subagent_status` | inspect delegated child spans, handoffs, statuses, and residual risks |
 | `verify_receipt_integrity` | verify receipt signatures against stored state |
 | `record_stuck_attempt` | record a materially different failed strategy |
 | `record_decision_record` | record a consequential reversible choice with evidence |
 | `record_counterexample_check` | record a disconfirming check with surviving risk |
-| `record_user_authorization` | record explicit user approval for irreversible or externally visible actions |
-| `authorization_status` | inspect latest user authorization freshness and scope |
 | `turn_end_gate` | approve or reject ending a turn using fresh receipts |
 | `completion_gate` | approve or reject completion using criterion-to-receipt mappings with semantic and freshness checks |
 | `export_handoff_packet` | export a continuity packet with mission state, receipts, budget, decisions, and residual risk |
+| `mission_status` | inspect mission state, budgets, and gate freshness |
 
 ## Runtime files
 
@@ -54,12 +60,14 @@ ILH_DB_PATH=/tmp/ilh.db ILH_SECRET_PATH=/tmp/secret.key python mcp/server.py
 
 Receipts replace unverifiable prose with runtime evidence. Bash receipts can include command text and exit code. Write/Edit receipts can include file path and resulting file hash. Read-like receipts show what source was inspected.
 
+Governance records that claim runtime backing, including stuck attempts, decision records, and counterexample checks, require non-empty captured receipt IDs. Hosts without automatic receipt capture cannot satisfy those APIs with an empty `receipt_ids` list; report direct local evidence separately or fix the host bridge instead of fabricating receipt IDs.
+
 ## Claude Code integration
 
 Generate a settings snippet with:
 
 ```bash
-python scripts/generate_host_config.py --project-dir /absolute/path/to/agent-runway
+python scripts/generate_host_config.py --agent-runway-dir /absolute/path/to/agent-runway
 ```
 
 The bundled hooks can:
@@ -75,13 +83,13 @@ The bundled hooks can:
 Generate an OpenCode config snippet with:
 
 ```bash
-python scripts/generate_host_config.py --host opencode --project-dir /absolute/path/to/agent-runway
+python scripts/generate_host_config.py --host opencode --agent-runway-dir /absolute/path/to/agent-runway
 ```
 
 This release now provides:
 
 - a host-native OpenCode MCP configuration snippet
-- repo-local runtime wiring via `ILH_DB_PATH` and `ILH_SECRET_PATH`
+- project-local runtime state by default, with `ILH_DB_PATH` reserved for explicit per-project overrides
 - optional bridge environment propagation from OpenCode config into the Python bridge process, with Python bytecode writes disabled for bridge calls
 
 For automatic OpenCode receipt capture, the bridge still needs discovery from a real OpenCode plugin directory such as project `.opencode/plugins/`, user `~/.config/opencode/plugins/`, or Windows `%USERPROFILE%\.config\opencode\plugins\`. The skill-internal plugin file is not auto-loaded by OpenCode on its own.
@@ -96,7 +104,7 @@ This release does not claim:
 Generate the Pi CLI capability note with:
 
 ```bash
-python scripts/generate_host_config.py --host pi-cli --project-dir /absolute/path/to/agent-runway
+python scripts/generate_host_config.py --host pi-cli --agent-runway-dir /absolute/path/to/agent-runway
 ```
 
 This is extension-only. The v0.36 experiment verifies Pi extension `tool_call` blocking for an actual `bash` call, but it does not emit native MCP configuration and does not claim Claude Code `Stop` parity.
@@ -106,7 +114,7 @@ This is extension-only. The v0.36 experiment verifies Pi extension `tool_call` b
 Run these checks before shipping changes:
 
 ```bash
-python -m unittest discover -s mcp/tests -p 'test_*.py'
+python -B -m pytest mcp/tests -q
 python scripts/smoke_test.py
 python scripts/host_blocking_experiments.py
 ```
@@ -117,5 +125,6 @@ python scripts/host_blocking_experiments.py
 
 - without host hooks, stop enforcement remains advisory
 - a successful receipt proves a tool ran, not that the high-level task is semantically complete
+- Codex and other instructions-only MCP paths do not claim automatic shell/read/edit receipt capture in this repo; receipt-backed governance APIs need real captured receipts or an explicit degraded evidence path
 - if the host allows secret or database tampering, receipt trust degrades
 - Pi CLI support is extension-only, not native MCP or Stop hook parity

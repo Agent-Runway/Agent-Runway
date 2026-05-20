@@ -35,11 +35,19 @@ class IntegrationWorkflowTestCase(unittest.TestCase):
         os.environ.pop("ILH_DB_PATH", None)
         os.environ.pop("ILH_SECRET_PATH", None)
 
-    def receipt(self, task_id: str, tool: str, text: str, exit_code: int = 0):
+    def receipt(
+        self,
+        task_id: str,
+        tool: str,
+        text: str,
+        exit_code: int = 0,
+        *,
+        source: str = "integration-test",
+    ):
         return self.store.record_receipt(
             session_id="integration",
             task_id=task_id,
-            source="integration-test",
+            source=source,
             tool_name=tool,
             command_text=text,
             exit_code=exit_code,
@@ -63,7 +71,7 @@ class IntegrationWorkflowTestCase(unittest.TestCase):
             const server = await plugin.server();
             await server.event({{event: {{type: "session.created", sessionID: "node-after", info: {{cwd: {json.dumps(str(REPO_ROOT))}}}}}}});
             await server["tool.execute.after"]({{sessionID: "node-after", tool: "bash", args: {{command: {json.dumps(command)}}}}}, {{output: "OK", metadata: {{exitCode: 0}}}});
-            const gate = spawnSync(py, ["-c", "import server; r=server.store.list_recent_receipts('node-after','opencode-e2e',1)[0]; print(server.completion_gate('node-after','opencode-e2e',[{{'criterion':'tests pass','receipt_ids':[r.receipt_id]}}],'Mapped the OpenCode plugin receipt to the tests criterion.'))"], {{cwd: {json.dumps(str(REPO_ROOT))}, env, stdio: "inherit"}});
+            const gate = spawnSync(py, ["-c", "import server; r=server.store.list_recent_receipts('node-after','opencode-e2e',1)[0]; server.turn_end_gate('node-after','opencode-e2e','slice_verified','Mapped the OpenCode plugin receipt before completion.',[r.receipt_id]); print(server.completion_gate('node-after','opencode-e2e',[{{'criterion':'tests pass','receipt_ids':[r.receipt_id]}}],'Mapped the OpenCode plugin receipt to the tests criterion.'))"], {{cwd: {json.dumps(str(REPO_ROOT))}, env, stdio: "inherit"}});
             if (gate.status !== 0) process.exit(gate.status || 1);
         """)
         env = os.environ.copy()
@@ -82,7 +90,15 @@ class IntegrationWorkflowTestCase(unittest.TestCase):
     def test_bugfix_flow_requires_post_edit_test_receipt(self) -> None:
         self.server.mission_lock("integration", "bugfix", "fix parsing bug", ["tests pass"])
         old_test = self.receipt("bugfix", "Bash", "python -m unittest", 0)
-        self.receipt("bugfix", "Edit", "src/parser.py", 0)
+        self.receipt("bugfix", "Edit", "src/parser.py", 0, source="claude-hook")
+        turn = self.server.turn_end_gate(
+            "integration",
+            "bugfix",
+            "slice_verified",
+            "Recorded the pre-edit test receipt to prove completion still rejects stale evidence.",
+            [old_test.receipt_id],
+        )
+        self.assertIn("APPROVED", turn)
 
         rejected = self.server.completion_gate(
             "integration",
@@ -93,6 +109,14 @@ class IntegrationWorkflowTestCase(unittest.TestCase):
         self.assertIn("stale evidence", rejected)
 
         fresh_test = self.receipt("bugfix", "Bash", "python -m unittest", 0)
+        turn = self.server.turn_end_gate(
+            "integration",
+            "bugfix",
+            "slice_verified",
+            "Ran the post-edit test receipt before attempting completion.",
+            [fresh_test.receipt_id],
+        )
+        self.assertIn("APPROVED", turn)
         approved = self.server.completion_gate(
             "integration",
             "bugfix",

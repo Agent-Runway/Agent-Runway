@@ -154,6 +154,42 @@ class AdversarialAuditTestCase(unittest.TestCase):
         records[1]["observed_result"] = "The adversary proved safe behavior."
         self.assertIn("banned proof-of-safety phrase", "\n".join(audit.lint_records(records)))
 
+    def test_banned_proof_of_safety_phrase_with_invisible_characters_fails_lint(self) -> None:
+        audit = importlib.import_module("agent_runway_runtime.adversarial_audit")
+        records = valid_records()
+        records[1]["observed_result"] = "The adversary proved s\u200bafe behavior."
+        self.assertIn("banned proof-of-safety phrase", "\n".join(audit.lint_records(records)))
+
+    def test_banned_proof_of_safety_phrase_with_invisible_mark_fails_lint(self) -> None:
+        audit = importlib.import_module("agent_runway_runtime.adversarial_audit")
+        records = valid_records()
+        records[1]["observed_result"] = "The adversary proved s\ufe00afe behavior."
+
+        self.assertIn("banned proof-of-safety phrase", "\n".join(audit.lint_records(records)))
+
+    def test_audit_acceptance_authorization_with_invisible_character_fails_lint(self) -> None:
+        audit = importlib.import_module("agent_runway_runtime.adversarial_audit")
+        acceptance = {
+            "record_type": "audit_acceptance",
+            "acceptance_id": "acceptance-1",
+            "linked_finding_id": "finding-blocking",
+            "accepted_scope": "completion gate rejects stale receipts",
+            "reason": "Do not auth\u200borize this through audit acceptance.",
+            "timestamp": "2026-05-09T00:00:03Z",
+        }
+
+        issues = audit.lint_records([audit_plan(), audit_attempt("attack_succeeded"), finding("blocking", "high"), acceptance])
+
+        self.assertIn("audit_acceptance must not be used as authorization", issues)
+
+    def test_invisible_character_scan_does_not_merge_audit_record_keys(self) -> None:
+        audit = importlib.import_module("agent_runway_runtime.adversarial_audit")
+        records = valid_records()
+        records[1]["observed\u200b_result"] = "A decoy value with a colliding normalized key."
+        records[1]["observed_result"] = "The adversary proved s\u200bafe behavior."
+
+        self.assertIn("banned proof-of-safety phrase", "\n".join(audit.lint_records(records)))
+
     def test_nonblocking_dispositions_do_not_block_gate(self) -> None:
         audit = importlib.import_module("agent_runway_runtime.adversarial_audit")
         for disposition in ["needs_reproduction", "false_positive", "non_blocking"]:
@@ -263,14 +299,6 @@ class AdversarialAuditTestCase(unittest.TestCase):
         self.assertEqual(0, good_proc.returncode, good_proc.stdout)
         self.assertNotEqual(0, bad_proc.returncode, bad_proc.stdout)
 
-    def test_release_gate_declares_independent_adversarial_audit_gate(self) -> None:
-        module = load_script_module("release_gate")
-        checks = module.build_ordered_checks(REPO_ROOT)
-        names = [check[0] for check in checks]
-        self.assertEqual(16, len(names))
-        self.assertIn("adversarial_audit_suite", names)
-        self.assertLess(names.index("benchmark_suite"), names.index("adversarial_audit_suite"))
-
     def test_completion_gate_rejects_required_unresolved_blocking_audit(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             os.environ["ILH_DB_PATH"] = str(Path(td) / "state.db")
@@ -283,7 +311,9 @@ class AdversarialAuditTestCase(unittest.TestCase):
                 ["tests pass"],
                 adversarial_audit_required=True,
                 adversarial_audit_profiles=["runtime_gate_adversary"],
-                adversarial_audit_records=[audit_plan(99), audit_attempt("attack_succeeded"), finding("blocking", "high")],
+                adversarial_audit_claims=["completion gate rejects stale receipts"],
+                adversarial_audit_budget=audit_plan(1)["audit_budget"],
+                adversarial_audit_records=[audit_plan(1), audit_attempt("attack_succeeded"), finding("blocking", "high")],
             )
             receipt = server.store.record_receipt("s1", "test", "Bash", "pytest", 0, {}, task_id="t1")
             result = server.completion_gate(

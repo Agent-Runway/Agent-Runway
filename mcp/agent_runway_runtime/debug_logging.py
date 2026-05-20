@@ -24,14 +24,17 @@ def write_debug_log(event: str, details: dict[str, Any] | None = None) -> None:
     if not debug_enabled():
         return
     path = debug_log_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "event": event,
         "details": _redact(details or {}),
     }
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, ensure_ascii=True, sort_keys=True) + "\n")
+    except OSError:
+        return
 
 
 def _redact(value: Any) -> Any:

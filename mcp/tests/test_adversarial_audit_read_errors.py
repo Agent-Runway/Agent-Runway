@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MCP_ROOT = REPO_ROOT / "mcp"
@@ -13,7 +14,7 @@ if str(MCP_ROOT) not in sys.path:
     sys.path.insert(0, str(MCP_ROOT))
 
 from agent_runway_runtime.adversarial_audit import read_records
-from agent_runway_runtime.adversarial_audit_reading import AuditRecordReadError
+from agent_runway_runtime.adversarial_audit_reading import AuditRecordReadError, read_one
 
 
 class AdversarialAuditReadErrorsTestCase(unittest.TestCase):
@@ -64,6 +65,19 @@ class AdversarialAuditReadErrorsTestCase(unittest.TestCase):
                 read_records([bad])
 
         self.assertIn("line 1", context.exception.issue)
+
+    def test_jsonl_reader_streams_without_reading_entire_file(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            records = Path(td) / "records.jsonl"
+            records.write_text(
+                '{"record_type":"audit_plan"}\n{"record_type":"audit_attempt"}\n',
+                encoding="utf-8",
+            )
+
+            with patch.object(Path, "read_text", side_effect=AssertionError("jsonl must stream")):
+                loaded = read_one(records)
+
+        self.assertEqual(["audit_plan", "audit_attempt"], [record["record_type"] for record in loaded])
 
 
 def run_lint(path: Path) -> subprocess.CompletedProcess[str]:

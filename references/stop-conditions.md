@@ -16,6 +16,8 @@ Only these conditions are legal:
 ### slice_verified
 Use when the current slice objective was achieved and verified, and no immediate next action remains inside the frontier.
 
+Do not use it to hide continuation debt. If assumptions, risks, unverified items, or the stop reason still identify a local next high-value campaign, new alpha source, template redesign, or equivalent next frontier, the slice is not a legal stopping point unless a real authority, information, or exhausted-budget boundary applies.
+
 ### frontier_exhausted
 Use when the currently reachable action frontier was fully consumed and the next useful move depends on a fresh turn boundary rather than missing work.
 

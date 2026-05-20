@@ -33,6 +33,7 @@ from .adversarial_audit_schema import (
     SECRET_PATTERNS,
     SEVERITIES,
 )
+from .detection_text import strip_invisible_controls_deep
 
 
 def lint_records(records: list[dict[str, Any]]) -> list[str]:
@@ -224,7 +225,8 @@ def _lint_acceptance(record: dict[str, Any], issues: list[str]) -> None:
         issues.append("audit_acceptance requires accepted_scope")
     if not str(record.get("reason", "")).strip():
         issues.append("audit_acceptance requires reason")
-    if "authorize" in json.dumps(record, ensure_ascii=False).lower():
+    normalized_record = strip_invisible_controls_deep(record)
+    if "authorize" in json.dumps(normalized_record, ensure_ascii=False).lower():
         issues.append("audit_acceptance must not be used as authorization")
 
 
@@ -238,7 +240,7 @@ def _lint_update(record: dict[str, Any], ids: dict[str, dict[str, Any]], issues:
 
 
 def _lint_text(record: dict[str, Any], issues: list[str]) -> None:
-    scan_record = dict(record)
+    scan_record = dict(strip_invisible_controls_deep(record))
     if isinstance(scan_record.get("audit_scope"), dict):
         scan_record["audit_scope"] = dict(scan_record["audit_scope"])
         scan_record["audit_scope"].pop("excluded_actions", None)
@@ -271,6 +273,11 @@ def _check_required_claims(attempts: list[dict[str, Any]], required: list[str], 
 
 def _check_freshness(plans: list[dict[str, Any]], latest_seq: int, issues: list[str]) -> None:
     baselines = latest_receipt_seq_baselines(plans)
+    future = [seq for seq in baselines if seq > latest_seq]
+    if future:
+        issues.append(
+            f"audit_plan freshness_baseline.latest_receipt_seq cannot exceed latest receipt seq {latest_seq}: {future}"
+        )
     if baselines and max(baselines) < latest_seq:
         issues.append(f"adversarial audit coverage is stale after receipt seq {latest_seq}")
 

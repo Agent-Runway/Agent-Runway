@@ -1,5 +1,5 @@
 {
-  "version": "v0.36",
+  "version": "v0.37",
   "claims": [
     {
       "id": "activation-discipline",
@@ -8,13 +8,10 @@
       "required_files": [
         "SKILL.md",
         "references/trigger-matrix.md",
-        "references/scoring-rubric.md",
-        "scripts/self_audit.py"
+        "references/scoring-rubric.md"
       ],
       "required_tools": [],
-      "required_scripts": [
-        "scripts/self_audit.py"
-      ],
+      "required_scripts": [],
       "required_hooks": [],
       "min_mode": "soft"
     },
@@ -27,12 +24,11 @@
         "references/operating-modes.md",
         "references/degradation-modes.md",
         "references/runtime-capability-matrix.md",
-        "scripts/claim_parity_audit.py"
+        "archive/release-tests/consistency_lint.py",
+        "archive/release-tests/ledger_guard.py"
       ],
       "required_tools": [],
-      "required_scripts": [
-        "scripts/claim_parity_audit.py"
-      ],
+      "required_scripts": [],
       "required_hooks": [],
       "min_mode": "soft"
     },
@@ -57,21 +53,18 @@
     {
       "id": "receipt-integrity",
       "statement": "receipt integrity is verifiable rather than implied",
-      "enforcement": "mcp+benchmark",
+      "enforcement": "mcp+tests",
       "required_files": [
         "mcp/server.py",
         "mcp/agent_runway_runtime/store.py",
         "mcp/tests/test_receipt_scope_edges.py",
         "mcp/tests/test_receipt_scope_validation_edges.py",
-        "references/receipt-quality.md",
-        "scripts/benchmark_suite.py"
+        "references/receipt-quality.md"
       ],
       "required_tools": [
         "verify_receipt_integrity"
       ],
-      "required_scripts": [
-        "scripts/benchmark_suite.py"
-      ],
+      "required_scripts": [],
       "required_hooks": [],
       "min_mode": "mcp"
     },
@@ -95,11 +88,10 @@
     {
       "id": "budget-enforcement",
       "statement": "slice-budget exhaustion can block another verified-slice claim instead of being treated as invisible narration",
-      "enforcement": "mcp+benchmark",
+      "enforcement": "mcp+tests",
       "required_files": [
         "mcp/server.py",
         "references/budget-discipline.md",
-        "scripts/benchmark_suite.py",
         "mcp/tests/test_runtime.py",
         "mcp/tests/test_receipt_scope_edges.py",
         "mcp/tests/test_receipt_scope_validation_edges.py"
@@ -107,9 +99,29 @@
       "required_tools": [
         "turn_end_gate"
       ],
-      "required_scripts": [
-        "scripts/benchmark_suite.py"
+      "required_scripts": [],
+      "required_hooks": [],
+      "min_mode": "mcp"
+    },
+    {
+      "id": "completion-turn-gate-binding",
+      "statement": "completion_gate requires a fresh approved turn_end_gate whose receipt_ids cover every receipt used for final completion",
+      "enforcement": "mcp+tests+docs",
+      "required_files": [
+        "mcp/server.py",
+        "API.md",
+        "README.md",
+        "README_cn.md",
+        "references/receipt-quality.md",
+        "mcp/tests/test_runtime.py",
+        "mcp/tests/test_runtime_contract_edges.py",
+        "mcp/tests/test_receipt_scope_edges.py"
       ],
+      "required_tools": [
+        "turn_end_gate",
+        "completion_gate"
+      ],
+      "required_scripts": [],
       "required_hooks": [],
       "min_mode": "mcp"
     },
@@ -132,71 +144,69 @@
     },
     {
       "id": "counterexample-runtime",
-      "statement": "counterexample checks can be recorded, required, benchmarked, and exported",
-      "enforcement": "mcp+benchmark",
+      "statement": "counterexample checks can be recorded, required, and exported",
+      "enforcement": "mcp+tests",
       "required_files": [
         "mcp/server.py",
-        "references/counterexample-discipline.md",
-        "scripts/benchmark_suite.py"
+        "mcp/tests/test_runtime.py",
+        "mcp/tests/test_runtime_regressions.py",
+        "references/counterexample-discipline.md"
       ],
       "required_tools": [
         "record_counterexample_check",
         "completion_gate",
         "export_handoff_packet"
       ],
-      "required_scripts": [
-        "scripts/benchmark_suite.py"
-      ],
+      "required_scripts": [],
       "required_hooks": [],
       "min_mode": "mcp"
     },
     {
       "id": "handoff-continuity",
       "statement": "a handoff packet can transfer mission context, receipts, budget status, criterion coverage, and residual risk without hidden memory",
-      "enforcement": "mcp+benchmark",
+      "enforcement": "mcp+tests",
       "required_files": [
         "mcp/server.py",
-        "references/handoff-packets.md",
-        "scripts/benchmark_suite.py"
+        "mcp/tests/test_runtime.py",
+        "mcp/tests/test_runtime_regressions.py",
+        "references/handoff-packets.md"
       ],
       "required_tools": [
         "export_handoff_packet"
       ],
-      "required_scripts": [
-        "scripts/benchmark_suite.py"
-      ],
+      "required_scripts": [],
       "required_hooks": [],
       "min_mode": "mcp"
     },
     {
       "id": "user-authorization-runtime",
-      "statement": "explicit user approval for irreversible or externally visible actions can be recorded with scope, freshness, and expiry in runtime state",
-      "enforcement": "mcp+benchmark",
+      "statement": "explicit user approval for irreversible or externally visible actions can be recorded with scope, freshness, expiry, and named standing-boundary semantics in runtime state",
+      "enforcement": "mcp+tests",
       "required_files": [
         "mcp/server.py",
+        "mcp/tests/test_runtime.py",
+        "mcp/agent_runway_runtime/store.py",
         "references/authority-boundaries.md",
-        "references/runtime-capability-matrix.md",
-        "scripts/benchmark_suite.py"
+        "references/runtime-capability-matrix.md"
       ],
       "required_tools": [
         "record_user_authorization",
         "authorization_status",
         "export_handoff_packet"
       ],
-      "required_scripts": [
-        "scripts/benchmark_suite.py"
-      ],
+      "required_scripts": [],
       "required_hooks": [],
       "min_mode": "mcp"
     },
     {
       "id": "host-risk-interception",
-      "statement": "risky bash usage and sensitive-file reads can be intercepted only when host hooks are active",
+      "statement": "risky bash usage and protected secret, state, or credential file reads can be intercepted only when host hooks or bridge tool-event hooks are active",
       "enforcement": "hook+tests",
       "required_files": [
         "scripts/claude_hooks.py",
         "mcp/agent_runway_runtime/debug_logging.py",
         "mcp/tests/test_hooks.py",
+        "mcp/tests/test_host_security_interception.py",
         "mcp/tests/test_hook_payload_edges.py",
         "mcp/tests/test_debug_logging.py",
         "references/runtime-capability-matrix.md"
@@ -210,40 +220,8 @@
       "min_mode": "hosted-hook"
     },
     {
-      "id": "release-discipline",
-      "statement": "release claims are gated by validation, tests, smoke, parity, consistency, ledger, audit, benchmark, and mutation checks",
-      "enforcement": "scripts",
-      "required_files": [
-        "references/release-gates.md",
-        "scripts/release_gate.py",
-        "scripts/consistency_lint.py",
-        "scripts/claim_parity_audit.py",
-        "scripts/ledger_guard.py",
-        "scripts/self_audit.py",
-        "scripts/benchmark_suite.py",
-        "scripts/adversarial_audit_suite.py",
-        "scripts/adversarial_mutation_suite.py",
-        "scripts/quick_validate.py",
-        "scripts/package_skill_check.py",
-        "scripts/release_static_checks.py"
-      ],
-      "required_tools": [],
-      "required_scripts": [
-        "scripts/release_gate.py",
-        "scripts/consistency_lint.py",
-        "scripts/claim_parity_audit.py",
-        "scripts/ledger_guard.py",
-        "scripts/quick_validate.py",
-        "scripts/adversarial_audit_suite.py",
-        "scripts/package_skill_check.py",
-        "scripts/release_static_checks.py"
-      ],
-      "required_hooks": [],
-      "min_mode": "soft"
-    },
-    {
       "id": "opencode-plugin-bridge",
-      "statement": "OpenCode plugin bridge forwards pre-tool arguments, denies secret reads, propagates configured DB/secret environment into the Python bridge, disables bridge bytecode writes, and fails closed for ask decisions when host-native confirmation is unavailable",
+      "statement": "OpenCode plugin bridge forwards pre-tool arguments, denies protected secret/state/credential reads, propagates configured DB/secret environment into the Python bridge, disables bridge bytecode writes, and fails closed for ask decisions when host-native confirmation is unavailable",
       "enforcement": "plugin+bridge+tests",
       "required_files": [
         ".opencode/plugins/agent-runway.js",
@@ -253,8 +231,8 @@
         "mcp/tests/test_opencode_bridge_payload_edges.py",
         "mcp/tests/test_opencode_plugin_jsonc_edges.py",
         "mcp/tests/test_opencode_plugin_duration_edges.py",
-        "mcp/tests/test_release_gate.py",
         "mcp/tests/test_hooks.py",
+        "mcp/tests/test_host_security_interception.py",
         "mcp/tests/test_hook_payload_edges.py",
         "mcp/tests/test_debug_logging.py"
       ],
@@ -291,49 +269,75 @@
       "min_mode": "soft"
     },
     {
-      "id": "evolution-evidence",
-      "statement": "generation-4 improvement claims are backed by ten rounds and at least 200 accepted micro-optimizations at or above the 9.5 threshold",
-      "enforcement": "docs+script",
+      "id": "project-learning-ledger",
+      "statement": "project learning is implemented as a project-local reviewable JSONL ledger with policy, strict linting, bounded query, and advisory-only execution discipline rather than runtime evidence or authorization",
+      "enforcement": "docs+script+tests",
       "required_files": [
-        "references/evolution-ledger.md",
-        "references/generation-4-scorecards.md",
-        "scripts/ledger_guard.py"
+        "references/project-learning-ledger-policy.md",
+        "scripts/project_learning_lint.py",
+        "scripts/project_learning_query.py",
+        "mcp/tests/test_project_learning.py",
+        "mcp/tests/test_project_learning_query_edges.py",
+        "mcp/tests/test_project_learning_lint.py",
+        "mcp/tests/test_runtime_regressions.py"
       ],
       "required_tools": [],
       "required_scripts": [
-        "scripts/ledger_guard.py"
+        "scripts/project_learning_lint.py",
+        "scripts/project_learning_query.py"
       ],
       "required_hooks": [],
       "min_mode": "soft"
     },
     {
-      "id": "project-learning-ledger",
-      "statement": "project learning is implemented as a reviewable JSONL ledger with schema, policy, strict linting, bounded query, and advisory-only release discipline rather than runtime evidence or authorization",
-      "enforcement": "docs+script+tests",
+      "id": "dynamic-context-jsonl",
+      "statement": "dynamic context is implemented as an explicit project-local JSONL file with mission_id, session_id, task_id, 100k record bounds, lint/query tests, and no evidence or authorization semantics",
+      "enforcement": "script+tests+docs",
       "required_files": [
-        "references/project-learning-ledger.jsonl",
-        "references/project-learning-ledger.schema.json",
-        "references/project-learning-ledger-policy.md",
-        "scripts/project_learning_lint.py",
-        "scripts/project_learning_query.py",
-        "mcp/tests/test_project_learning.py",
-        "mcp/tests/test_project_learning_lint.py",
-        "mcp/tests/test_release_gate.py",
-        "mcp/tests/test_consistency_lint.py"
+        "API.md",
+        "README.md",
+        "README_cn.md",
+        "scripts/dynamic_context.py",
+        "mcp/tests/test_dynamic_context.py"
       ],
       "required_tools": [],
       "required_scripts": [
-        "scripts/project_learning_lint.py",
-        "scripts/project_learning_query.py",
-        "scripts/release_static_checks.py",
-        "scripts/consistency_lint.py"
+        "scripts/dynamic_context.py"
+      ],
+      "required_hooks": [],
+      "min_mode": "soft"
+    },
+    {
+      "id": "context-recovery",
+      "statement": "compact and continuation recovery checks the active project's SQLite mission state first, can explicitly resume an active mission through mission_resume and host-session binding, then falls back to explicit dynamic-context JSONL candidates and asks for clarification when no source is sufficient, without claiming automatic host pre-prompt enforcement",
+      "enforcement": "script+mcp+tests+docs",
+      "required_files": [
+        "API.md",
+        "README.md",
+        "README_cn.md",
+        "scripts/context_recovery.py",
+        "scripts/dynamic_context.py",
+        "mcp/tests/test_context_recovery.py",
+        "mcp/tests/test_dynamic_context.py",
+        "mcp/tests/test_prompt_intake.py",
+        "mcp/tests/test_long_session_continuation.py",
+        "mcp/tests/test_runtime_contract_edges.py"
+      ],
+      "required_tools": [
+        "mission_resume",
+        "prompt_intake_gate",
+        "mission_status"
+      ],
+      "required_scripts": [
+        "scripts/context_recovery.py",
+        "scripts/dynamic_context.py"
       ],
       "required_hooks": [],
       "min_mode": "soft"
     },
     {
       "id": "adversarial-audit-gate",
-      "statement": "Adversarial Audit Gate adds bounded falsification before high-risk completion claims through protocol docs, schema, lint, deterministic suite, and conditional completion-gate integration without claiming proof of safety",
+      "statement": "Adversarial Audit Gate adds bounded falsification before high-risk completion claims through protocol docs, schema, lint, and conditional completion-gate integration without claiming proof of safety",
       "enforcement": "docs+script+tests+mcp-conditional",
       "required_files": [
         "references/adversarial-audit.md",
@@ -343,7 +347,6 @@
         "references/adversarial-audit-examples.md",
         "references/adversarial-audit-profiles.json",
         "scripts/adversarial_audit_lint.py",
-        "scripts/adversarial_audit_suite.py",
         "mcp/agent_runway_runtime/adversarial_audit.py",
         "mcp/agent_runway_runtime/adversarial_audit_plan_edges.py",
         "mcp/agent_runway_runtime/adversarial_audit_reading.py",
@@ -358,11 +361,86 @@
         "completion_gate"
       ],
       "required_scripts": [
-        "scripts/adversarial_audit_lint.py",
-        "scripts/adversarial_audit_suite.py"
+        "scripts/adversarial_audit_lint.py"
       ],
       "required_hooks": [],
       "min_mode": "soft"
+    },
+    {
+      "id": "subagent-supervision",
+      "statement": "subagent work is represented as supervised child spans with explicit handoff records, terminal lifecycle state, and delegated-evidence validation rather than summary-only trust",
+      "enforcement": "mcp+docs+tests",
+      "required_files": [
+        "mcp/server.py",
+        "mcp/agent_runway_runtime/store.py",
+        "mcp/tests/test_subagent_supervision.py",
+        "mcp/tests/test_subagent_registration_edges.py",
+        "mcp/tests/test_subagent_handoff_edges.py",
+        "mcp/tests/test_store_migrations.py",
+        "mcp/tests/test_subagent_status_edges.py",
+        "mcp/tests/test_subagent_completion_edges.py",
+        "mcp/tests/test_subagent_docs.py",
+        "references/subagent-supervision.md",
+        "references/subagent-capability-matrix.md",
+        "references/subagent-runtime-consistency.md"
+      ],
+      "required_tools": [
+        "register_subagent_start",
+        "record_subagent_handoff",
+        "register_subagent_stop",
+        "subagent_status"
+      ],
+      "required_scripts": [],
+      "required_hooks": [],
+      "min_mode": "mcp"
+    },
+    {
+      "id": "claude-subagent-hooks",
+      "statement": "Claude Code SubagentStart and SubagentStop hooks can register or close supervised child spans only when configured and the event includes an explicit agent_runway contract; otherwise they record visibility-only receipts without claiming cross-host lifecycle parity",
+      "enforcement": "claude-hooks+config+docs+tests",
+      "required_files": [
+        "scripts/claude_hooks.py",
+        "scripts/generate_host_config.py",
+        "mcp/tests/test_subagent_hooks.py",
+        "references/host-integration.md",
+        "references/runtime-capability-matrix.md"
+      ],
+      "required_tools": [],
+      "required_scripts": [
+        "scripts/generate_host_config.py"
+      ],
+      "required_hooks": [
+        "subagent_start",
+        "subagent_stop"
+      ],
+      "min_mode": "hosted-hook"
+    },
+    {
+      "id": "prompt-intake-gate",
+      "statement": "short prompts, multilingual continuation phrases, explicit or implicit Agent-Runway activation, compression recovery, confidence/sources, and scoped authorization are classified by a runtime MCP tool without claiming host pre-prompt enforcement where no user-message hook is evidenced",
+      "enforcement": "mcp+docs+tests",
+      "required_files": [
+        "mcp/server.py",
+        "mcp/agent_runway_runtime/store.py",
+        "mcp/agent_runway_runtime/prompt_intake.py",
+        "mcp/agent_runway_runtime/prompt_intake_mission_match.py",
+        "mcp/agent_runway_runtime/prompt_intake_registry.py",
+        "mcp/agent_runway_runtime/prompt_intake_signals.py",
+        "mcp/tests/test_prompt_intake.py",
+        "mcp/tests/test_prompt_intake_edges.py",
+        "mcp/tests/test_prompt_intake_mission_match.py",
+        "mcp/tests/test_prompt_intake_signals.py",
+        "SKILL.md",
+        "references/trigger-matrix.md",
+        "references/runtime-capability-matrix.md",
+        "references/host-integration.md"
+      ],
+      "required_tools": [
+        "prompt_intake_gate"
+      ],
+      "required_scripts": [],
+      "required_hooks": [],
+      "min_mode": "mcp"
     }
   ]
 }

@@ -11,7 +11,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LINT = REPO_ROOT / "scripts" / "project_learning_lint.py"
 QUERY = REPO_ROOT / "scripts" / "project_learning_query.py"
-LEDGER = REPO_ROOT / "references" / "project-learning-ledger.jsonl"
 
 
 def base_record(**overrides: object) -> dict[str, object]:
@@ -46,9 +45,19 @@ class ProjectLearningLintTestCase(unittest.TestCase):
             proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False)
         return proc.returncode, json.loads(proc.stdout)
 
-    def test_repository_ledger_passes(self) -> None:
-        proc = subprocess.run([sys.executable, str(LINT), str(LEDGER), "--strict"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False)
-        self.assertEqual(proc.returncode, 0, proc.stdout)
+    def test_missing_default_ledger_fails_explicitly(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            proc = subprocess.run(
+                [sys.executable, str(LINT), "--json"],
+                cwd=Path(td),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(proc.returncode, 2)
+        payload = json.loads(proc.stdout)
+        self.assertIn("file does not exist", payload["errors"][0]["issue"])
 
     def test_malformed_json_fails_with_line_number(self) -> None:
         code, payload = self.run_lint(['{"bad"'])
@@ -182,13 +191,17 @@ class ProjectLearningLintTestCase(unittest.TestCase):
         self.assertTrue(any("active record is expired" in item["issue"] for item in payload["errors"]))
 
     def test_query_filters_limits_and_warns(self) -> None:
-        proc = subprocess.run(
-            [sys.executable, str(QUERY), str(LEDGER), "--host", "opencode", "--limit", "99", "--json"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=False,
-        )
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "ledger.jsonl"
+            records = [base_record(id="inv_host_enforcement_honesty", type="invariant", reopen_if=["x"])]
+            path.write_text("\n".join(json.dumps(item) for item in records), encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(QUERY), str(path), "--host", "opencode", "--limit", "99", "--json"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
         self.assertEqual(proc.returncode, 0, proc.stdout)
         payload = json.loads(proc.stdout)
         self.assertEqual(payload["limit"], 5)
@@ -217,11 +230,11 @@ class ProjectLearningLintTestCase(unittest.TestCase):
     def test_query_filters_by_path_and_task(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "ledger.jsonl"
-            task_match = base_record(id="pitfall_task_match", applies_to={"tasks": ["release"], "paths": ["scripts/release_gate.py"]})
+            task_match = base_record(id="pitfall_task_match", applies_to={"tasks": ["host setup"], "paths": ["scripts/generate_host_config.py"]})
             task_miss = base_record(id="pitfall_task_miss", applies_to={"tasks": ["docs"], "paths": ["README.md"]})
             path.write_text("\n".join(json.dumps(item) for item in [task_match, task_miss]), encoding="utf-8")
             proc = subprocess.run(
-                [sys.executable, str(QUERY), str(path), "--task", "release", "--path", "scripts/release_gate.py", "--json"],
+                [sys.executable, str(QUERY), str(path), "--task", "host setup", "--path", "scripts/generate_host_config.py", "--json"],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,

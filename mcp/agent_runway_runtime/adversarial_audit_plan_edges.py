@@ -5,7 +5,9 @@ from typing import Any
 from .adversarial_audit_common import has_timezone, parse_time
 
 
-def lint_freshness_baseline(baseline: Any, issues: list[str]) -> None:
+def lint_freshness_baseline(
+    baseline: Any, issues: list[str], latest_receipt_seq: int | None = None
+) -> None:
     if not isinstance(baseline, dict):
         return
     seq = baseline.get("latest_receipt_seq")
@@ -13,6 +15,11 @@ def lint_freshness_baseline(baseline: Any, issues: list[str]) -> None:
         issues.append("audit_plan requires integer freshness_baseline.latest_receipt_seq")
     elif seq < 0:
         issues.append("audit_plan requires freshness_baseline.latest_receipt_seq >= 0")
+    elif latest_receipt_seq is not None and seq > latest_receipt_seq:
+        issues.append(
+            "audit_plan freshness_baseline.latest_receipt_seq cannot exceed "
+            f"latest receipt seq {latest_receipt_seq}: {seq}"
+        )
 
 
 def lint_attempt_plan_id(

@@ -5,8 +5,10 @@ import argparse
 import json
 import os
 import sys
+import traceback
+from functools import wraps
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MCP_ROOT = REPO_ROOT / "mcp"
@@ -166,12 +168,55 @@ def load_event() -> dict[str, Any]:
     )
 
 
+def bridge_entrypoint(func: Callable[[dict[str, Any]], dict[str, Any]]) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    @wraps(func)
+    def wrapper(event: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return func(event)
+        except Exception as exc:
+            write_debug_log("opencode_bridge.error", bridge_error_details(func.__name__, event, exc))
+            raise
+
+    return wrapper
+
+
+def bridge_error_details(entrypoint: str, event: Any, exc: Exception) -> dict[str, Any]:
+    return {
+        "entrypoint": entrypoint,
+        "exception_type": type(exc).__name__,
+        "error_message": str(exc),
+        "session_id": event.get("session_id") if isinstance(event, dict) else None,
+        "tool_name": event.get("tool_name") if isinstance(event, dict) else None,
+        "event_keys": sorted(event) if isinstance(event, dict) else [],
+        "payload_type": type(event).__name__,
+        "traceback": traceback.format_exception(type(exc), exc, exc.__traceback__),
+    }
+
+
+def log_bridge_validation_error(details: dict[str, Any]) -> None:
+    event = details.get("event")
+    write_debug_log(
+        "opencode_bridge.validation_error",
+        {
+            "entrypoint": details.get("entrypoint"),
+            "error": details.get("error"),
+            "field": details.get("field", ""),
+            "session_id": event.get("session_id") if isinstance(event, dict) else None,
+            "tool_name": event.get("tool_name") if isinstance(event, dict) else None,
+        },
+    )
+
+
+@bridge_entrypoint
 def session_created(event: dict[str, Any]) -> dict[str, Any]:
     write_debug_log(
         "opencode_bridge.session_created",
         {"session_id": event.get("session_id"), "cwd": event.get("cwd")},
     )
     if claude_hooks.event_parse_failed(event):
+        log_bridge_validation_error(
+            {"entrypoint": "session_created", "event": event, "error": event.get("error") or "parse_failed"}
+        )
         return {"recorded": False}
 
     normalized = {
@@ -187,12 +232,16 @@ def session_created(event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+@bridge_entrypoint
 def pre_tool_use(event: dict[str, Any]) -> dict[str, Any]:
     write_debug_log(
         "opencode_bridge.pre_tool_use",
         {"session_id": event.get("session_id"), "tool_name": event.get("tool_name"), "tool_input": event.get("tool_input")},
     )
     if claude_hooks.event_parse_failed(event):
+        log_bridge_validation_error(
+            {"entrypoint": "pre_tool_use", "event": event, "error": event.get("error") or "parse_failed"}
+        )
         return {
             "decision": "deny",
             "reason": "tool use denied because the bridge could not parse the pre-tool event payload",
@@ -200,28 +249,45 @@ def pre_tool_use(event: dict[str, Any]) -> dict[str, Any]:
     tool_name = claude_hooks.canonical_tool_name(str(event.get("tool_name", "")))
     tool_input = claude_hooks.optional_object_field(event, "tool_input")
     if tool_input is None:
+        log_bridge_validation_error(
+            {"entrypoint": "pre_tool_use", "event": event, "error": "malformed_field", "field": "tool_input"}
+        )
         return _deny_malformed_field("tool_input")
-    decision = claude_hooks.pre_tool_use_decision(tool_name, tool_input)
+    decision = claude_hooks.pre_tool_use_decision(tool_name, tool_input, event.get("cwd"))
     if decision is None:
         return {"decision": "allow"}
+    claude_hooks.record_hook_decision_event(
+        event,
+        source="opencode-plugin",
+        hook_event_name="OpenCodeToolExecuteBefore",
+        decision=decision["permissionDecision"],
+        reason=decision["permissionDecisionReason"],
+    )
     return {
         "decision": decision["permissionDecision"],
         "reason": decision["permissionDecisionReason"],
     }
 
 
+@bridge_entrypoint
 def post_tool_use(event: dict[str, Any]) -> dict[str, Any]:
     write_debug_log(
         "opencode_bridge.post_tool_use",
         {"session_id": event.get("session_id"), "tool_name": event.get("tool_name"), "tool_input": event.get("tool_input")},
     )
     if claude_hooks.event_parse_failed(event):
+        log_bridge_validation_error(
+            {"entrypoint": "post_tool_use", "event": event, "error": event.get("error") or "parse_failed"}
+        )
         return {"recorded": False}
 
     malformed = claude_hooks.first_malformed_object_field(
         event, ("tool_input", "tool_response")
     )
     if malformed is not None:
+        log_bridge_validation_error(
+            {"entrypoint": "post_tool_use", "event": event, "error": "malformed_field", "field": malformed}
+        )
         return {"recorded": False, "reason": _malformed_field_reason(malformed)}
 
     normalized = {
@@ -246,6 +312,8 @@ def _normalized_tool_input(event: dict[str, Any]) -> dict[str, Any]:
         return {
             "command": tool_input.get("command") or tool_input.get("cmd") or tool_input.get("prompt") or tool_input.get("task") or "",
         }
+    if canonical.startswith("agent-runway_"):
+        return tool_input
     return {
         "filePath": tool_input.get("filePath") or tool_input.get("file_path") or tool_input.get("path") or "",
         "path": tool_input.get("path") or tool_input.get("filePath") or tool_input.get("file_path") or "",
@@ -263,6 +331,9 @@ def _normalized_tool_response(event: dict[str, Any]) -> dict[str, Any]:
         "stderr": tool_response.get("stderr") or "",
         "metadata": metadata,
     }
+    for key in ("exit", "exitCode", "exit_code"):
+        if key in tool_response:
+            normalized_response[key] = tool_response[key]
     for key in ("durationMs", "duration_ms", "durationSeconds", "duration_seconds"):
         if key in tool_response:
             normalized_response[key] = tool_response[key]
