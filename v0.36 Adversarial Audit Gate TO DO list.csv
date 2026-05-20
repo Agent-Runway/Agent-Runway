@@ -1,0 +1,11 @@
+﻿id,item,status,done_at,notes
+1,补齐 v0.36 archive CSV 状态列与新增 Pi CLI/README_cn 任务,DONE,2026-05-09T18:27:43+08:00,archive CSV now has todo_status column and V036-081..083 user-requested tasks; PowerShell CSV parse confirmed 83 rows and todo/done enum
+2,建立 v0.36 本地工作 CSV 并对齐执行切片,DONE,2026-05-09T18:28:07+08:00,root tracking CSV created and synchronized with conversation todo state
+3,编写 Adversarial Audit 失败测试和 fixtures,DONE,2026-05-09T18:48:34+08:00,"test_adversarial_audit.py now covers lint, suite, release gate wiring, and conditional completion gate behavior; targeted test passes"
+4,实现 adversarial audit schema/lint/suite/profiles/docs,DONE,2026-05-09T18:49:05+08:00,"adversarial audit runtime helper, schema, profiles, docs, lint CLI, suite CLI, fixtures, and conditional completion-gate integration implemented"
+5,集成 release gate、benchmark、mutation、claim/consistency/static checks,DONE,2026-05-09T18:50:52+08:00,"release gate, static checks, consistency lint, claim parity, benchmark, and mutation catalog now include adversarial audit governance; targeted commands pass"
+6,分析 Pi CLI 源码/资料并更新 README 能力边界,DONE,2026-05-09T23:53:03+08:00,"Pi CLI source/docs and actual npx experiment verified extension tool_call blocking; README, capability matrix, host docs, host adapter, claim manifest updated without native MCP or Stop parity overclaim"
+7,更新 README_cn 术语与 v0.36 文档入口,DONE,2026-05-09T23:53:03+08:00,"README_cn uses 门控 terminology; grep for 门禁 returned no matches; v0.36 adversarial audit and Pi CLI boundaries documented"
+8,运行 targeted/full 验证并记录反例检查,DONE,2026-05-09T23:53:03+08:00,"Full 16-gate release_gate passed; unit_tests 272 tests OK after OpenCode bridge regression coverage; adversarial_mutation_suite 18/18 caught; host_blocking_experiments passed for Claude Code, Pi CLI, and OpenCode"
+9,规划自动化测试与故障定位系统 TODO,DONE,2026-05-09T23:53:03+08:00,"V036-084 added; host_blocking_experiments.py now emits failure_locator likely_files for Claude Code, Pi CLI, and OpenCode; future release-gate integration remains optional because host CLIs are environment-dependent"
+10,修复 OpenCode bridge 环境透传与测试污染,DONE,2026-05-10T00:52:47+08:00,"TDD added test_opencode_plugin.py; plugin and Python bridge now propagate configured ILH_DB_PATH/ILH_SECRET_PATH, disable bytecode writes, and runtime default-path tests no longer create repo-local .agent-runway/state.db"

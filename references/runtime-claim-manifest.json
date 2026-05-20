@@ -1,0 +1,347 @@
+{
+  "version": "v0.36",
+  "claims": [
+    {
+      "id": "activation-discipline",
+      "statement": "the skill is specific enough to auto-invoke on high-autonomy, high-verification work without encouraging broad over-application",
+      "enforcement": "prose+audit",
+      "required_files": [
+        "SKILL.md",
+        "references/trigger-matrix.md",
+        "references/scoring-rubric.md",
+        "scripts/self_audit.py"
+      ],
+      "required_tools": [],
+      "required_scripts": [
+        "scripts/self_audit.py"
+      ],
+      "required_hooks": [],
+      "min_mode": "soft"
+    },
+    {
+      "id": "runtime-honesty",
+      "statement": "the skill distinguishes soft, mcp, and hosted guarantees instead of overselling runtime enforcement",
+      "enforcement": "prose+audit",
+      "required_files": [
+        "SKILL.md",
+        "references/operating-modes.md",
+        "references/degradation-modes.md",
+        "references/runtime-capability-matrix.md",
+        "scripts/claim_parity_audit.py"
+      ],
+      "required_tools": [],
+      "required_scripts": [
+        "scripts/claim_parity_audit.py"
+      ],
+      "required_hooks": [],
+      "min_mode": "soft"
+    },
+    {
+      "id": "mission-lock-runtime",
+      "statement": "missions, criteria, red lines, and budgets can be locked in structured runtime state",
+      "enforcement": "mcp",
+      "required_files": [
+        "mcp/server.py",
+        "references/mission-schema.md",
+        "references/budget-discipline.md"
+      ],
+      "required_tools": [
+        "mission_lock",
+        "mission_status",
+        "budget_status"
+      ],
+      "required_scripts": [],
+      "required_hooks": [],
+      "min_mode": "mcp"
+    },
+    {
+      "id": "receipt-integrity",
+      "statement": "receipt integrity is verifiable rather than implied",
+      "enforcement": "mcp+benchmark",
+      "required_files": [
+        "mcp/server.py",
+        "mcp/agent_runway_runtime/store.py",
+        "references/receipt-quality.md",
+        "scripts/benchmark_suite.py"
+      ],
+      "required_tools": [
+        "verify_receipt_integrity"
+      ],
+      "required_scripts": [
+        "scripts/benchmark_suite.py"
+      ],
+      "required_hooks": [],
+      "min_mode": "mcp"
+    },
+    {
+      "id": "budget-observability",
+      "statement": "budget pressure is visible and can be exported in handoff state",
+      "enforcement": "mcp",
+      "required_files": [
+        "mcp/server.py",
+        "references/budget-discipline.md",
+        "references/handoff-packets.md"
+      ],
+      "required_tools": [
+        "budget_status",
+        "export_handoff_packet"
+      ],
+      "required_scripts": [],
+      "required_hooks": [],
+      "min_mode": "mcp"
+    },
+    {
+      "id": "budget-enforcement",
+      "statement": "slice-budget exhaustion can block another verified-slice claim instead of being treated as invisible narration",
+      "enforcement": "mcp+benchmark",
+      "required_files": [
+        "mcp/server.py",
+        "references/budget-discipline.md",
+        "scripts/benchmark_suite.py",
+        "mcp/tests/test_runtime.py"
+      ],
+      "required_tools": [
+        "turn_end_gate"
+      ],
+      "required_scripts": [
+        "scripts/benchmark_suite.py"
+      ],
+      "required_hooks": [],
+      "min_mode": "mcp"
+    },
+    {
+      "id": "decision-record-runtime",
+      "statement": "consequential reversible choices can be recorded with evidence and exported",
+      "enforcement": "mcp",
+      "required_files": [
+        "mcp/server.py",
+        "references/decision-records.md",
+        "references/handoff-packets.md"
+      ],
+      "required_tools": [
+        "record_decision_record",
+        "export_handoff_packet"
+      ],
+      "required_scripts": [],
+      "required_hooks": [],
+      "min_mode": "mcp"
+    },
+    {
+      "id": "counterexample-runtime",
+      "statement": "counterexample checks can be recorded, required, benchmarked, and exported",
+      "enforcement": "mcp+benchmark",
+      "required_files": [
+        "mcp/server.py",
+        "references/counterexample-discipline.md",
+        "scripts/benchmark_suite.py"
+      ],
+      "required_tools": [
+        "record_counterexample_check",
+        "completion_gate",
+        "export_handoff_packet"
+      ],
+      "required_scripts": [
+        "scripts/benchmark_suite.py"
+      ],
+      "required_hooks": [],
+      "min_mode": "mcp"
+    },
+    {
+      "id": "handoff-continuity",
+      "statement": "a handoff packet can transfer mission context, receipts, budget status, criterion coverage, and residual risk without hidden memory",
+      "enforcement": "mcp+benchmark",
+      "required_files": [
+        "mcp/server.py",
+        "references/handoff-packets.md",
+        "scripts/benchmark_suite.py"
+      ],
+      "required_tools": [
+        "export_handoff_packet"
+      ],
+      "required_scripts": [
+        "scripts/benchmark_suite.py"
+      ],
+      "required_hooks": [],
+      "min_mode": "mcp"
+    },
+    {
+      "id": "user-authorization-runtime",
+      "statement": "explicit user approval for irreversible or externally visible actions can be recorded with scope, freshness, and expiry in runtime state",
+      "enforcement": "mcp+benchmark",
+      "required_files": [
+        "mcp/server.py",
+        "references/authority-boundaries.md",
+        "references/runtime-capability-matrix.md",
+        "scripts/benchmark_suite.py"
+      ],
+      "required_tools": [
+        "record_user_authorization",
+        "authorization_status",
+        "export_handoff_packet"
+      ],
+      "required_scripts": [
+        "scripts/benchmark_suite.py"
+      ],
+      "required_hooks": [],
+      "min_mode": "mcp"
+    },
+    {
+      "id": "host-risk-interception",
+      "statement": "risky bash usage and sensitive-file reads can be intercepted only when host hooks are active",
+      "enforcement": "hook+tests",
+      "required_files": [
+        "scripts/claude_hooks.py",
+        "mcp/tests/test_hooks.py",
+        "references/runtime-capability-matrix.md"
+      ],
+      "required_tools": [],
+      "required_scripts": [],
+      "required_hooks": [
+        "pre_tool_use",
+        "stop"
+      ],
+      "min_mode": "hosted"
+    },
+    {
+      "id": "release-discipline",
+      "statement": "release claims are gated by validation, tests, smoke, parity, consistency, ledger, audit, benchmark, and mutation checks",
+      "enforcement": "scripts",
+      "required_files": [
+        "references/release-gates.md",
+        "scripts/release_gate.py",
+        "scripts/consistency_lint.py",
+        "scripts/claim_parity_audit.py",
+        "scripts/ledger_guard.py",
+        "scripts/self_audit.py",
+        "scripts/benchmark_suite.py",
+        "scripts/adversarial_audit_suite.py",
+        "scripts/adversarial_mutation_suite.py",
+        "scripts/quick_validate.py",
+        "scripts/package_skill_check.py",
+        "scripts/release_static_checks.py"
+      ],
+      "required_tools": [],
+      "required_scripts": [
+        "scripts/release_gate.py",
+        "scripts/consistency_lint.py",
+        "scripts/claim_parity_audit.py",
+        "scripts/ledger_guard.py",
+        "scripts/quick_validate.py",
+        "scripts/adversarial_audit_suite.py",
+        "scripts/package_skill_check.py",
+        "scripts/release_static_checks.py"
+      ],
+      "required_hooks": [],
+      "min_mode": "soft"
+    },
+    {
+      "id": "opencode-plugin-bridge",
+      "statement": "OpenCode plugin bridge forwards pre-tool arguments, denies secret reads, propagates configured DB/secret environment into the Python bridge, disables bridge bytecode writes, and fails closed for ask decisions when host-native confirmation is unavailable",
+      "enforcement": "plugin+bridge+tests",
+      "required_files": [
+        ".opencode/plugins/agent-runway.js",
+        "scripts/opencode_plugin_bridge.py",
+        "mcp/tests/test_opencode_plugin.py",
+        "mcp/tests/test_release_gate.py",
+        "mcp/tests/test_hooks.py"
+      ],
+      "required_tools": [],
+      "required_scripts": [
+        "scripts/opencode_plugin_bridge.py"
+      ],
+      "required_hooks": [
+        "pre_tool_use"
+      ],
+      "min_mode": "hosted"
+    },
+    {
+      "id": "host-blocking-experiments",
+      "statement": "cross-host blocking claims are backed by reproducible local experiments for Claude Code configured hooks, Pi CLI extension tool_call blocking, and OpenCode plugin bridge blocking without treating Pi CLI as native MCP or Stop-hook parity",
+      "enforcement": "script+docs+tests",
+      "required_files": [
+        "scripts/host_blocking_experiments.py",
+        "scripts/fixtures/pi_block_extension.js",
+        "scripts/fixtures/opencode_block_experiment.mjs",
+        "mcp/agent_runway_runtime/host_adapters.py",
+        "mcp/tests/test_host_adapters.py",
+        "mcp/tests/test_generate_host_config.py",
+        "references/runtime-capability-matrix.md",
+        "references/host-integration.md"
+      ],
+      "required_tools": [],
+      "required_scripts": [
+        "scripts/host_blocking_experiments.py"
+      ],
+      "required_hooks": [],
+      "min_mode": "soft"
+    },
+    {
+      "id": "evolution-evidence",
+      "statement": "generation-4 improvement claims are backed by ten rounds and at least 200 accepted micro-optimizations at or above the 9.5 threshold",
+      "enforcement": "docs+script",
+      "required_files": [
+        "references/evolution-ledger.md",
+        "references/generation-4-scorecards.md",
+        "scripts/ledger_guard.py"
+      ],
+      "required_tools": [],
+      "required_scripts": [
+        "scripts/ledger_guard.py"
+      ],
+      "required_hooks": [],
+      "min_mode": "soft"
+    },
+    {
+      "id": "project-learning-ledger",
+      "statement": "project learning is implemented as a reviewable JSONL ledger with schema, policy, strict linting, bounded query, and advisory-only release discipline rather than runtime evidence or authorization",
+      "enforcement": "docs+script+tests",
+      "required_files": [
+        "references/project-learning-ledger.jsonl",
+        "references/project-learning-ledger.schema.json",
+        "references/project-learning-ledger-policy.md",
+        "scripts/project_learning_lint.py",
+        "scripts/project_learning_query.py",
+        "mcp/tests/test_project_learning.py",
+        "mcp/tests/test_project_learning_lint.py",
+        "mcp/tests/test_release_gate.py",
+        "mcp/tests/test_consistency_lint.py"
+      ],
+      "required_tools": [],
+      "required_scripts": [
+        "scripts/project_learning_lint.py",
+        "scripts/project_learning_query.py",
+        "scripts/release_static_checks.py",
+        "scripts/consistency_lint.py"
+      ],
+      "required_hooks": [],
+      "min_mode": "soft"
+    },
+    {
+      "id": "adversarial-audit-gate",
+      "statement": "Adversarial Audit Gate adds bounded falsification before high-risk completion claims through protocol docs, schema, lint, deterministic suite, and conditional completion-gate integration without claiming proof of safety",
+      "enforcement": "docs+script+tests+mcp-conditional",
+      "required_files": [
+        "references/adversarial-audit.md",
+        "references/adversarial-audit-rubric.md",
+        "references/adversarial-audit-threat-model.md",
+        "references/adversarial-audit-schema.json",
+        "references/adversarial-audit-examples.md",
+        "references/adversarial-audit-profiles.json",
+        "scripts/adversarial_audit_lint.py",
+        "scripts/adversarial_audit_suite.py",
+        "mcp/agent_runway_runtime/adversarial_audit.py",
+        "mcp/tests/test_adversarial_audit.py"
+      ],
+      "required_tools": [
+        "mission_lock",
+        "completion_gate"
+      ],
+      "required_scripts": [
+        "scripts/adversarial_audit_lint.py",
+        "scripts/adversarial_audit_suite.py"
+      ],
+      "required_hooks": [],
+      "min_mode": "soft"
+    }
+  ]
+}

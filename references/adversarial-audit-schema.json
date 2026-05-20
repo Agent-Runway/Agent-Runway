@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agent Runway Adversarial Audit Records",
+  "type": "object",
+  "required": ["schema_version", "record_type"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "record_type": {
+      "enum": [
+        "audit_plan",
+        "audit_attempt",
+        "audit_finding",
+        "audit_disposition",
+        "audit_acceptance",
+        "audit_update"
+      ]
+    }
+  },
+  "additionalProperties": true
+}

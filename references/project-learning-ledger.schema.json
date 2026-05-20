@@ -1,0 +1,93 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agent-Runway Project Learning Ledger",
+  "type": "object",
+  "oneOf": [
+    { "$ref": "#/$defs/main_record" },
+    { "$ref": "#/$defs/memory_update" }
+  ],
+  "$defs": {
+    "source_ref": {
+      "type": "object",
+      "required": ["kind", "summary"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["file", "receipt", "test", "user_confirmation", "user_message", "release_gate"]
+        },
+        "path": { "type": "string" },
+        "anchor": { "type": "string" },
+        "summary": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "applies_to": {
+      "type": "object",
+      "properties": {
+        "hosts": { "type": "array", "items": { "type": "string" } },
+        "paths": { "type": "array", "items": { "type": "string" } },
+        "platforms": { "type": "array", "items": { "type": "string" } },
+        "tasks": { "type": "array", "items": { "type": "string" } },
+        "commands": { "type": "array", "items": { "type": "string" } },
+        "languages": { "type": "array", "items": { "type": "string" } },
+        "scope": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "main_record": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "type",
+        "id",
+        "project_id",
+        "status",
+        "summary",
+        "applies_to",
+        "source_refs",
+        "created_at",
+        "can_support_completion",
+        "requires_fresh_verification"
+      ],
+      "properties": {
+        "schema_version": { "const": "1.0" },
+        "type": { "enum": ["pitfall", "runbook", "preference", "invariant"] },
+        "id": { "type": "string" },
+        "project_id": { "type": "string" },
+        "status": {
+          "enum": ["draft", "candidate", "active", "mitigated", "obsolete", "disputed"]
+        },
+        "summary": { "type": "string" },
+        "applies_to": { "$ref": "#/$defs/applies_to" },
+        "source_refs": { "type": "array", "items": { "$ref": "#/$defs/source_ref" } },
+        "created_at": { "type": "string" },
+        "last_verified_at": { "type": "string" },
+        "last_confirmed_at": { "type": "string" },
+        "expires_at": { "type": "string" },
+        "invalid_if": { "type": "array", "items": { "type": "string" } },
+        "reopen_if": { "type": "array", "items": { "type": "string" } },
+        "steps": { "type": "array", "items": { "type": "string" } },
+        "severity": { "enum": ["low", "medium", "high", "critical"] },
+        "priority": { "enum": ["low", "medium", "high", "critical"] },
+        "can_support_completion": { "const": false },
+        "requires_fresh_verification": { "const": true }
+      },
+      "additionalProperties": true
+    },
+    "memory_update": {
+      "type": "object",
+      "required": ["schema_version", "type", "id", "target_id", "action", "reason", "source_refs", "created_at"],
+      "properties": {
+        "schema_version": { "const": "1.0" },
+        "type": { "const": "memory_update" },
+        "id": { "type": "string" },
+        "target_id": { "type": "string" },
+        "action": { "enum": ["mark_obsolete", "mark_disputed", "mark_mitigated", "refresh_verified"] },
+        "reason": { "type": "string" },
+        "source_refs": { "type": "array", "items": { "$ref": "#/$defs/source_ref" } },
+        "created_at": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "schema_version": "1.0",
+  "profiles": [
+    {
+      "name": "runtime_gate_adversary",
+      "target_area": "mission, receipt, completion, epoch, freshness",
+      "attack_types": ["stale_evidence", "mission_epoch", "receipt_replay_collision", "evidence_type_mismatch", "counterexample_gap", "budget_bypass"],
+      "required_evidence": "execution receipt or direct deterministic repro artifact",
+      "default_budget": {"max_hypotheses": 4, "max_executable_attacks": 2, "max_runtime_seconds": 30}
+    },
+    {
+      "name": "host_harness_adversary",
+      "target_area": "hooks, secret paths, dangerous commands, OpenCode bridge",
+      "attack_types": ["secret_path_bypass", "host_capability_overclaim", "opencode_bridge_gap", "install_config_drift"],
+      "required_evidence": "host fixture, hook test, or bounded command transcript",
+      "default_budget": {"max_hypotheses": 4, "max_executable_attacks": 2, "max_runtime_seconds": 30}
+    },
+    {
+      "name": "release_claim_adversary",
+      "target_area": "README, claim manifest, release gate drift",
+      "attack_types": ["host_capability_overclaim", "release_gate_drift", "assertion_laundering"],
+      "required_evidence": "static lint output or deterministic fixture",
+      "default_budget": {"max_hypotheses": 3, "max_executable_attacks": 2, "max_runtime_seconds": 20}
+    },
+    {
+      "name": "project_learning_adversary",
+      "target_area": "Project Learning Ledger evidence and authorization boundaries",
+      "attack_types": ["project_learning_poisoning", "evidence_type_mismatch", "authorization_freshness"],
+      "required_evidence": "ledger lint output or completion-gate fixture",
+      "default_budget": {"max_hypotheses": 3, "max_executable_attacks": 2, "max_runtime_seconds": 20}
+    },
+    {
+      "name": "platform_adversary",
+      "target_area": "path, shell, environment and install differences",
+      "attack_types": ["install_config_drift", "secret_path_bypass", "host_capability_overclaim"],
+      "required_evidence": "cross-platform path fixture or script output",
+      "default_budget": {"max_hypotheses": 3, "max_executable_attacks": 2, "max_runtime_seconds": 20}
+    },
+    {
+      "name": "concurrency_adversary",
+      "target_area": "parallel receipt and mission updates",
+      "attack_types": ["concurrency_race", "receipt_replay_collision"],
+      "required_evidence": "bounded deterministic concurrency test",
+      "default_budget": {"max_hypotheses": 2, "max_executable_attacks": 1, "max_runtime_seconds": 30}
+    },
+    {
+      "name": "install_adversary",
+      "target_area": "host configuration and discovery",
+      "attack_types": ["install_config_drift", "host_capability_overclaim", "opencode_bridge_gap"],
+      "required_evidence": "config generation or discovery fixture",
+      "default_budget": {"max_hypotheses": 3, "max_executable_attacks": 2, "max_runtime_seconds": 20}
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+interface:
+  display_name: Agent-Runway
+  short_description: High-autonomy execution with falsifiable progress, receipts, bounded persistence, and adversarially checked release discipline.
+policy:
+  products:
+  - chatgpt
+  - codex
+  - api
+  - atlas
+  allow_implicit_invocation: true
